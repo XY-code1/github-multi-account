@@ -20,6 +20,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github-multi-account/internal/config"
@@ -31,7 +33,7 @@ import (
 //go:embed all:assets
 var assetsFS embed.FS
 
-var candidatePorts = []int{8000, 8080, 8888, 5000, 3000, 9000}
+var candidatePorts = []int{8000, 8080, 8888, 5000, 3000, 9000, 8001, 8081, 9090}
 
 func main() {
 	base := baseDir()
@@ -82,11 +84,11 @@ func run(configDir, dataDir string) error {
 	}
 	srv := server.New(cfg, svc, st, assetsSub)
 
-	port := findPort()
+	port := choosePort(dataDir)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("监听 %s 失败: %w", addr, err)
+		return fmt.Errorf("监听 %s 失败: %w。提示：Windows 上 Hyper-V / WSL / Docker 可能保留了部分端口段，可用 netsh interface ipv4 show excludedportrange protocol=tcp 查看", addr, err)
 	}
 	httpSrv := &http.Server{Handler: srv.Handler()}
 	log.Printf("GitHub 多账号仪表盘已启动: http://%s", addr)
@@ -111,13 +113,62 @@ func run(configDir, dataDir string) error {
 	}
 }
 
-func findPort() int {
+func portAvailable(p int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+// osAssignedPort 让操作系统分配一个空闲端口（系统不会分配被保留的端口段）。
+func osAssignedPort() int {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = ln.Close() }()
+	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
+		return addr.Port
+	}
+	return 0
+}
+
+func portFile(dataDir string) string { return filepath.Join(dataDir, "server.port") }
+
+func readSavedPort(dataDir string) int {
+	b, err := os.ReadFile(portFile(dataDir))
+	if err != nil {
+		return 0
+	}
+	p, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || p < 1 || p > 65535 {
+		return 0
+	}
+	return p
+}
+
+func savePort(dataDir string, p int) {
+	_ = os.MkdirAll(dataDir, 0o755)
+	_ = os.WriteFile(portFile(dataDir), []byte(strconv.Itoa(p)), 0o644)
+}
+
+// choosePort 选一个可用端口：优先沿用上次成功的端口，其次用固定候选端口，
+// 最后让系统分配 —— 避免 Windows 保留端口段导致启动失败。
+func choosePort(dataDir string) int {
+	if p := readSavedPort(dataDir); p > 0 && portAvailable(p) {
+		return p
+	}
 	for _, p := range candidatePorts {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-		if err == nil {
-			_ = ln.Close()
+		if portAvailable(p) {
+			savePort(dataDir, p)
 			return p
 		}
+	}
+	if p := osAssignedPort(); p > 0 {
+		savePort(dataDir, p)
+		return p
 	}
 	return 8000
 }

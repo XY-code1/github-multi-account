@@ -8,6 +8,8 @@
 2. **双击 exe** —— 自动选端口、启动服务、打开浏览器，**没有黑色控制台窗口**
 3. 首次使用在页面右上角「添加账号」录入 Token，或直接编辑 `config/accounts.yaml`
 
+> **关于端口**：程序优先沿用上次成功的端口（记录在 `data/server.port`）；若固定候选端口被占用、或被系统保留（Windows 上 Hyper-V / WSL / Docker 常预留端口段），会自动让操作系统分配一个空闲端口，因此不会再出现「access permissions」启动失败。
+
 ### 从 Python 版迁移
 
 把 Python 版目录下的这两个文件复制到 exe 所在目录的 `config\` 里即可，**Token 不用重新录入**（Fernet 加密完全兼容）：
