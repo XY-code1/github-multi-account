@@ -95,6 +95,7 @@ def load_accounts() -> list[dict[str, Any]]:
                 "id": idx,
                 "label": acc.get("label") or username or f"账号 {idx}",
                 "username": username,
+                "group": acc.get("group") or "",
                 "token": token,
             }
         )
@@ -121,6 +122,7 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
             {
                 "label": a.get("label", ""),
                 "username": a.get("username", ""),
+                "group": a.get("group", ""),
                 "token_encrypted": encrypt_text(a.get("token", ""), key),
             }
             for a in accounts
@@ -142,16 +144,17 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
         _cache["accounts"] = None
 
 
-def add_account(label: str, username: str, token: str) -> dict[str, Any]:
+def add_account(label: str, username: str, token: str, group: str = "") -> dict[str, Any]:
     accounts = load_accounts()
     for acc in accounts:
         if acc["username"] == username and username:
             acc["label"] = label or acc["label"]
             acc["token"] = token
+            acc["group"] = group
             save_accounts(accounts)
             return acc
     accounts.append(
-        {"id": len(accounts) + 1, "label": label or username, "username": username, "token": token}
+        {"id": len(accounts) + 1, "label": label or username, "username": username, "group": group, "token": token}
     )
     for idx, acc in enumerate(accounts, start=1):
         acc["id"] = idx
@@ -187,7 +190,7 @@ def export_backup(password: str | None = None) -> dict[str, Any]:
         "app": "github-multi-account",
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "accounts": [
-            {"label": a["label"], "username": a["username"], "token": a["token"]}
+            {"label": a["label"], "username": a["username"], "group": a.get("group", ""), "token": a["token"]}
             for a in accounts
         ],
     }
@@ -227,13 +230,16 @@ def import_backup(payload: dict[str, Any], password: str | None = None) -> dict[
             continue
         label = item.get("label")
         label = label if isinstance(label, str) and label.strip() else username
+        group = item.get("group")
+        group = group.strip() if isinstance(group, str) else ""
         existing = next((a for a in accounts if a["username"] == username), None)
         if existing:
             existing["label"] = label
             existing["token"] = token
+            existing["group"] = group
             updated += 1
         else:
-            accounts.append({"id": 0, "label": label, "username": username, "token": token})
+            accounts.append({"id": 0, "label": label, "username": username, "group": group, "token": token})
             added += 1
     if added or updated:
         for idx, acc in enumerate(accounts, start=1):

@@ -62,6 +62,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/accounts/{id}", s.handleDeleteAccount)
 	s.mux.HandleFunc("POST /api/verify", s.handleVerify)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
+	s.mux.HandleFunc("GET /api/search", s.handleSearch)
 	s.mux.HandleFunc("GET /api/status/{id}", s.handleAccountStatus)
 	s.mux.HandleFunc("POST /api/accounts/{id}/verify", s.handleVerifyAccount)
 	s.mux.HandleFunc("GET /api/accounts/export", s.handleExport)
@@ -95,6 +96,7 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			"id":           a.ID,
 			"label":        a.Label,
 			"username":     a.Username,
+			"group":        a.Group,
 			"token_masked": a.MaskedToken(),
 			"has_token":    a.Token != "",
 		})
@@ -106,6 +108,7 @@ type accountIn struct {
 	Label    string `json:"label"`
 	Username string `json:"username"`
 	Token    string `json:"token"`
+	Group    string `json:"group"`
 }
 
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +125,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "token 不能为空"})
 		return
 	}
-	acc, err := s.cfg.Add(in.Label, in.Username, in.Token)
+	acc, err := s.cfg.Add(in.Label, in.Username, in.Token, in.Group)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
@@ -131,6 +134,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		"id":           acc.ID,
 		"label":        acc.Label,
 		"username":     acc.Username,
+		"group":        acc.Group,
 		"token_masked": acc.MaskedToken(),
 	})
 }
@@ -181,6 +185,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": s.svc.Summaries(accounts)})
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		kind = "all"
+	}
+	accounts, err := s.cfg.Accounts()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, service.GlobalSearch(accounts, q, kind))
 }
 
 func (s *Server) handleAccountStatus(w http.ResponseWriter, r *http.Request) {

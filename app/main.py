@@ -64,6 +64,13 @@ async def config_error_handler(request: Request, exc: config.ConfigError):
 
 # ------------------------------ 请求模型 ------------------------------
 
+class AccountIn(BaseModel):
+    label: str = ""
+    username: str
+    token: str
+    group: str = ""
+
+
 class ExportIn(BaseModel):
     password: str = ""
 
@@ -80,6 +87,7 @@ async def list_accounts() -> dict[str, Any]:
                 "id": a["id"],
                 "label": a["label"],
                 "username": a["username"],
+                "group": a.get("group", ""),
                 "token_masked": config.mask_token(a["token"]),
                 "has_token": bool(a["token"]),
             }
@@ -95,11 +103,12 @@ async def create_account(payload: AccountIn) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="username 不能为空")
     if not payload.token:
         raise HTTPException(status_code=400, detail="token 不能为空")
-    acc = config.add_account(payload.label, payload.username, payload.token)
+    acc = config.add_account(payload.label, payload.username, payload.token, payload.group or "")
     return {
         "id": acc["id"],
         "label": acc["label"],
         "username": acc["username"],
+        "group": acc.get("group", ""),
         "token_masked": config.mask_token(acc["token"]),
     }
 
@@ -161,6 +170,13 @@ async def verify_account(account_id: int) -> dict[str, Any]:
         "user": result["user"],
         "error": result["error"],
     }
+
+
+@app.get("/api/search")
+async def search(q: str = "", kind: str = "all") -> dict[str, Any]:
+    """跨账号搜索 PR / Issue 标题。kind: all | pr | issue"""
+    accounts = config.load_accounts()
+    return await service.global_search(accounts, q, kind)
 
 
 # ------------------------------ 备份 / 历史 ------------------------------

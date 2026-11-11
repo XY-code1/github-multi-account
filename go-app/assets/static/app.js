@@ -18,6 +18,7 @@ const state = {
   highlightId: null,         // 键盘导航高亮的账号
   detailCache: {},           // id -> 详情缓存：切回已看过的账号时秒开
   detailLoadingId: null,     // 当前正在加载详情的账号
+  collapsedGroups: new Set(), // 折叠的账号分组
 };
 
 // ---------------- 工具函数 ----------------
@@ -233,6 +234,33 @@ async function refreshAll(selectFirstIfNone = false) {
 
 // ---------------- 渲染：账号侧栏 ----------------
 
+function accountCardHtml(a) {
+  const user = a.user || {};
+  const avatar = user.avatar_url
+    ? `<img class="account-avatar" src="${escapeHtml(user.avatar_url)}" alt="" onerror="handleImgError(this)">`
+    : `<div class="account-avatar account-avatar-placeholder">${escapeHtml((a.label || "?")[0])}</div>`;
+  const counts = a.status === "active"
+    ? `<span>${a.review_prs_count ?? 0} PR</span><span>·</span><span>${a.assigned_issues_count ?? 0} Issue</span>`
+    : "";
+  const err = a.error ? `<div class="account-user" style="color:var(--red)">${escapeHtml(a.error)}</div>` : "";
+  return `
+    <div class="account-card ${a.id === state.selectedId ? "selected" : ""} ${a.id === state.highlightId ? "highlighted" : ""} ${a.status === "invalid" || a.status === "error" ? "invalid" : ""}"
+         data-id="${a.id}">
+      ${avatar}
+      <div class="account-info">
+        <div class="account-name">${escapeHtml(a.label)}</div>
+        <div class="account-user">${escapeHtml(user.login || a.username || "")}</div>
+        <div class="account-status">
+          <span class="dot ${escapeHtml(a.status)}"></span>
+          <span>${statusText(a.status)}</span>
+          ${counts}
+        </div>
+        ${err}
+      </div>
+      <button class="account-del" data-del="${a.id}" title="删除账号">×</button>
+    </div>`;
+}
+
 function renderAccountList() {
   const list = document.getElementById("accountList");
   const query = state.searchQuery.trim().toLowerCase();
@@ -265,32 +293,44 @@ function renderAccountList() {
     state.highlightId = state.selectedId ?? accounts[0].id;
   }
 
-  list.innerHTML = accounts.map((a) => {
-    const user = a.user || {};
-    const avatar = user.avatar_url
-      ? `<img class="account-avatar" src="${escapeHtml(user.avatar_url)}" alt="" onerror="handleImgError(this)">`
-      : `<div class="account-avatar account-avatar-placeholder">${escapeHtml((a.label || "?")[0])}</div>`;
-    const counts = a.status === "active"
-      ? `<span>${a.review_prs_count ?? 0} PR</span><span>·</span><span>${a.assigned_issues_count ?? 0} Issue</span>`
-      : "";
-    const err = a.error ? `<div class="account-user" style="color:var(--red)">${escapeHtml(a.error)}</div>` : "";
-    return `
-      <div class="account-card ${a.id === state.selectedId ? "selected" : ""} ${a.id === state.highlightId ? "highlighted" : ""} ${a.status === "invalid" || a.status === "error" ? "invalid" : ""}"
-           data-id="${a.id}">
-        ${avatar}
-        <div class="account-info">
-          <div class="account-name">${escapeHtml(a.label)}</div>
-          <div class="account-user">${escapeHtml(user.login || a.username || "")}</div>
-          <div class="account-status">
-            <span class="dot ${escapeHtml(a.status)}"></span>
-            <span>${statusText(a.status)}</span>
-            ${counts}
-          </div>
-          ${err}
+  // 按分组聚合（未分组放最后）
+  const groups = new Map();
+  for (const a of accounts) {
+    const g = (a.group || "").trim();
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(a);
+  }
+  const groupNames = [...groups.keys()].sort((x, y) => {
+    if (x === "" && y !== "") return 1;
+    if (y === "" && x !== "") return -1;
+    return x.localeCompare(y);
+  });
+
+  let html = "";
+  groupNames.forEach((g, gi) => {
+    const items = groups.get(g);
+    if (g) {
+      const collapsed = state.collapsedGroups.has(g);
+      html += `<div class="group-header" data-group-toggle="${gi}" title="点击折叠 / 展开">
+          <span class="group-caret" data-caret="${gi}">${collapsed ? "▸" : "▾"}</span>
+          <span>${escapeHtml(g)}</span>
+          <span class="count-badge">${items.length}</span>
         </div>
-        <button class="account-del" data-del="${a.id}" title="删除账号">×</button>
-      </div>`;
-  }).join("");
+        <div class="group-body" data-group-body="${gi}" style="display:${collapsed ? "none" : ""}">`;
+    }
+    html += items.map(accountCardHtml).join("");
+    if (g) html += `</div>`;
+  });
+  list.innerHTML = html;
+
+  list.querySelectorAll("[data-group-toggle]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const g = groupNames[Number(el.dataset.groupToggle)];
+      if (state.collapsedGroups.has(g)) state.collapsedGroups.delete(g);
+      else state.collapsedGroups.add(g);
+      renderAccountList();
+    });
+  });
 
   list.querySelectorAll(".account-card").forEach((card) => {
     card.addEventListener("click", (e) => {
@@ -367,12 +407,15 @@ function renderTab() {
       break;
     case "review":
       content.innerHTML = prList(d.review_prs, "待我 Review");
+      bindListFilter();
       break;
     case "mypr":
       content.innerHTML = prList(d.my_prs, null);
+      bindListFilter();
       break;
     case "issues":
       content.innerHTML = issueList(d.assigned_issues);
+      bindListFilter();
       break;
     case "events":
       content.innerHTML = eventList(d.events);
@@ -695,9 +738,43 @@ async function exportHistory() {
   }
 }
 
+function listFilterBar() {
+  return `<div class="filter-bar">
+    <input id="listFilter" type="text" placeholder="过滤：仓库 / 标签 / 关键字" autocomplete="off">
+  </div>`;
+}
+
+function matchesListFilter(it, q) {
+  if (!q) return true;
+  return (
+    (it.title || "").toLowerCase().includes(q) ||
+    repoName(it.repository_url).toLowerCase().includes(q) ||
+    (it.labels || []).some((l) => (l.name || "").toLowerCase().includes(q))
+  );
+}
+
+function bindListFilter() {
+  const input = document.getElementById("listFilter");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    const q = input.value;
+    renderTab(); // 重新渲染后按关键字过滤
+    const el = document.getElementById("listFilter");
+    if (el) {
+      el.value = q;
+      el.focus();
+      el.setSelectionRange(q.length, q.length);
+    }
+  });
+}
+
 function prList(items, note) {
-  if (!items.length) return `<div class="empty-tab">${note ? "没有待处理的 PR" : "没有发起中的 PR"}</div>`;
-  return `<div class="item-list">${items.map((it) => `
+  const filter = listFilterBar();
+  if (!items.length) return `${filter}<div class="empty-tab">${note ? "没有待处理的 PR" : "没有发起中的 PR"}</div>`;
+  const q = (document.getElementById("listFilter")?.value || "").trim().toLowerCase();
+  const shown = items.filter((it) => matchesListFilter(it, q));
+  if (q && !shown.length) return `${filter}<div class="empty-tab">没有匹配的 PR</div>`;
+  return `${filter}<div class="item-list">${shown.map((it) => `
     <div class="item">
       <div class="item-icon pr">PR</div>
       <div class="item-body">
@@ -714,8 +791,12 @@ function prList(items, note) {
 }
 
 function issueList(items) {
-  if (!items.length) return `<div class="empty-tab">没有分配给你的 Issue</div>`;
-  return `<div class="item-list">${items.map((it) => `
+  const filter = listFilterBar();
+  if (!items.length) return `${filter}<div class="empty-tab">没有分配给你的 Issue</div>`;
+  const q = (document.getElementById("listFilter")?.value || "").trim().toLowerCase();
+  const shown = items.filter((it) => matchesListFilter(it, q));
+  if (q && !shown.length) return `${filter}<div class="empty-tab">没有匹配的 Issue</div>`;
+  return `${filter}<div class="item-list">${shown.map((it) => `
     <div class="item">
       <div class="item-icon issue">IS</div>
       <div class="item-body">
@@ -817,6 +898,7 @@ function upsertLocalAccount(acc) {
       status: "unknown",
       user: null,
       error: null,
+      group: acc.group || "",
       review_prs_count: 0,
       my_prs_count: 0,
       assigned_issues_count: 0,
@@ -869,6 +951,7 @@ function closeModal() {
   document.getElementById("fLabel").value = "";
   document.getElementById("fUsername").value = "";
   document.getElementById("fToken").value = "";
+  document.getElementById("fGroup").value = "";
   document.getElementById("testResult").textContent = "";
 }
 
@@ -968,6 +1051,7 @@ async function saveAccount() {
   const label = document.getElementById("fLabel").value.trim();
   const username = document.getElementById("fUsername").value.trim();
   const token = document.getElementById("fToken").value.trim();
+  const group = document.getElementById("fGroup").value.trim();
   if (!username || !token) {
     showToast("请填写用户名和 Token");
     return;
@@ -975,7 +1059,7 @@ async function saveAccount() {
   try {
     const saved = await api("/api/accounts", {
       method: "POST",
-      body: JSON.stringify({ label, username, token }),
+      body: JSON.stringify({ label, username, token, group }),
     });
     showToast("已保存");
     closeModal();
@@ -1029,6 +1113,63 @@ async function checkUpdate() {
     }
   } catch (e) {
     showToast("检查更新失败");
+  }
+}
+
+// ---------------- 全局搜索 ----------------
+
+function openSearchModal() {
+  document.getElementById("searchModal").classList.remove("hidden");
+  const input = document.getElementById("globalSearchInput");
+  input.value = "";
+  document.getElementById("globalSearchResults").innerHTML =
+    `<div class="empty-tab">输入关键字，搜索所有账号的 PR / Issue</div>`;
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeSearchModal() {
+  document.getElementById("searchModal").classList.add("hidden");
+}
+
+async function doGlobalSearch() {
+  const q = document.getElementById("globalSearchInput").value.trim();
+  const kind = document.getElementById("globalSearchKind").value;
+  const box = document.getElementById("globalSearchResults");
+  if (!q) {
+    box.innerHTML = `<div class="empty-tab">输入关键字开始搜索</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="empty-tab">搜索中…（会查询 ${state.accounts.length} 个账号）</div>`;
+  try {
+    const data = await api(`/api/search?q=${encodeURIComponent(q)}&kind=${encodeURIComponent(kind)}`);
+    const results = data.results || [];
+    if (!results.length) {
+      box.innerHTML = `<div class="empty-tab">没有匹配的结果（共查询 ${data.accounts} 个账号）</div>`;
+      return;
+    }
+    box.innerHTML =
+      `<div class="item-list">` +
+      results
+        .map(
+          (r) => `
+      <div class="item">
+        <div class="item-icon ${kind === "issue" ? "issue" : "pr"}">#${r.number}</div>
+        <div class="item-body">
+          <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>
+          <div class="item-meta">
+            <span class="repo-tag">${escapeHtml(r.repository)}</span>
+            <span class="label-tag">${escapeHtml(r.account_label)}</span>
+            ${(r.labels || []).map((l) => `<span class="label-tag">${escapeHtml(l)}</span>`).join("")}
+          </div>
+        </div>
+        <span class="item-time">${relTime(r.created_at)}</span>
+      </div>`
+        )
+        .join("") +
+      `</div>
+      <div class="trend-footer"><span>共 ${data.total} 条结果，搜索了 ${data.accounts} 个账号</span></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty-tab">搜索失败：${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -1147,7 +1288,7 @@ function isTypingTarget() {
 }
 
 function anyModalOpen() {
-  return ["modal", "backupModal", "shortcutsModal"].some(
+  return ["modal", "backupModal", "shortcutsModal", "searchModal"].some(
     (id) => !document.getElementById(id).classList.contains("hidden")
   );
 }
@@ -1165,10 +1306,17 @@ document.addEventListener("keydown", (e) => {
     closeModal();
     closeBackupModal();
     closeShortcutsModal();
+    closeSearchModal();
     return;
   }
   if (isTypingTarget()) return;
   if (anyModalOpen()) return; // 弹窗打开时只响应 Esc
+  // Ctrl/⌘ + K 全局搜索
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openSearchModal();
+    return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   const key = e.key.toLowerCase();
@@ -1257,6 +1405,18 @@ document.getElementById("shortcutsBtn").addEventListener("click", openShortcutsM
 document.getElementById("shortcutsCloseBtn").addEventListener("click", closeShortcutsModal);
 document.getElementById("shortcutsModal").addEventListener("click", (e) => {
   if (e.target.id === "shortcutsModal") closeShortcutsModal();
+});
+
+document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);
+document.getElementById("searchCloseBtn").addEventListener("click", closeSearchModal);
+document.getElementById("searchModal").addEventListener("click", (e) => {
+  if (e.target.id === "searchModal") closeSearchModal();
+});
+document.getElementById("globalSearchInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") doGlobalSearch();
+});
+document.getElementById("globalSearchKind").addEventListener("change", () => {
+  if (document.getElementById("globalSearchInput").value.trim()) doGlobalSearch();
 });
 
 document.querySelectorAll("#tabs .tab").forEach((t) => {

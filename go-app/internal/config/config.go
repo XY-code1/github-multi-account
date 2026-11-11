@@ -17,6 +17,7 @@ type Account struct {
 	ID       int
 	Label    string
 	Username string
+	Group    string
 	Token    string
 }
 
@@ -35,6 +36,7 @@ func (a Account) MaskedToken() string {
 type rawAccount struct {
 	Label          string `yaml:"label"`
 	Username       string `yaml:"username"`
+	Group          string `yaml:"group"`
 	Token          string `yaml:"token"`
 	TokenEncrypted string `yaml:"token_encrypted"`
 }
@@ -148,6 +150,7 @@ func (s *Store) Accounts() ([]Account, error) {
 			ID:       i + 1,
 			Label:    a.Label,
 			Username: a.Username,
+			Group:    a.Group,
 			Token:    token,
 		})
 	}
@@ -178,6 +181,7 @@ func (s *Store) writeLocked(accounts []Account) error {
 		f.Accounts = append(f.Accounts, rawAccount{
 			Label:          a.Label,
 			Username:       a.Username,
+			Group:          a.Group,
 			TokenEncrypted: enc,
 		})
 	}
@@ -206,7 +210,7 @@ func (s *Store) Save(accounts []Account) error {
 }
 
 // Add 新增或更新（同 username 覆盖）。
-func (s *Store) Add(label, username, token string) (Account, error) {
+func (s *Store) Add(label, username, token, group string) (Account, error) {
 	accounts, err := s.Accounts()
 	if err != nil {
 		return Account{}, err
@@ -215,13 +219,14 @@ func (s *Store) Add(label, username, token string) (Account, error) {
 		if username != "" && accounts[i].Username == username {
 			accounts[i].Label = label
 			accounts[i].Token = token
+			accounts[i].Group = group
 			if err := s.Save(accounts); err != nil {
 				return Account{}, err
 			}
 			return accounts[i], nil
 		}
 	}
-	acc := Account{Label: label, Username: username, Token: token}
+	acc := Account{Label: label, Username: username, Group: group, Token: token}
 	accounts = append(accounts, acc)
 	for i := range accounts {
 		accounts[i].ID = i + 1
@@ -272,6 +277,7 @@ func (s *Store) Export(password string) (map[string]any, error) {
 		out = append(out, map[string]any{
 			"label":    a.Label,
 			"username": a.Username,
+			"group":    a.Group,
 			"token":    a.Token,
 		})
 	}
@@ -324,18 +330,20 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 		if label == "" {
 			label = username
 		}
+		group, _ := m["group"].(string)
 		found := false
 		for i := range accounts {
 			if accounts[i].Username == username {
 				accounts[i].Label = label
 				accounts[i].Token = token
+				accounts[i].Group = group
 				updated++
 				found = true
 				break
 			}
 		}
 		if !found {
-			accounts = append(accounts, Account{Label: label, Username: username, Token: token})
+			accounts = append(accounts, Account{Label: label, Username: username, Group: group, Token: token})
 			added++
 		}
 	}

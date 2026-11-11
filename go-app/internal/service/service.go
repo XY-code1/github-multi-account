@@ -6,6 +6,8 @@ package service
 import (
 	"errors"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -440,4 +442,124 @@ func nonNil[T any](v []T) []T {
 		return []T{}
 	}
 	return v
+}
+
+// ------------------------------ 全局搜索 ------------------------------
+
+// SearchResult 是一条全局搜索结果。
+type SearchResult struct {
+	AccountID    int      `json:"account_id"`
+	AccountLabel string   `json:"account_label"`
+	Title        string   `json:"title"`
+	HTMLURL      string   `json:"html_url"`
+	Repository   string   `json:"repository"`
+	Number       int      `json:"number"`
+	CreatedAt    string   `json:"created_at"`
+	Labels       []string `json:"labels"`
+}
+
+func repoShort(url string) string {
+	parts := strings.Split(strings.Trim(url, "/"), "/")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	return url
+}
+
+// SearchAccount 在单个账号内按关键字搜索 PR / Issue。
+func SearchAccount(acc config.Account, query, kind string) []SearchResult {
+	if acc.Token == "" || strings.TrimSpace(query) == "" {
+		return []SearchResult{}
+	}
+	c := github.New(acc.Token)
+	user, err := c.User()
+	if err != nil {
+		return []SearchResult{}
+	}
+	login := user.Login
+
+	var queries []string
+	if kind == "all" || kind == "pr" {
+		queries = append(queries, "is:open is:pr author:"+login+" "+query)
+		queries = append(queries, "is:open is:pr review-requested:"+login+" "+query)
+	}
+	if kind == "all" || kind == "issue" {
+		queries = append(queries, "is:open is:issue assignee:"+login+" "+query)
+	}
+
+	var mu sync.Mutex
+	var results [][]github.IssueItem
+	var wg sync.WaitGroup
+	for _, q := range queries {
+		wg.Add(1)
+		go func(q string) {
+			defer wg.Done()
+			_, items, err := c.Search(q, 30)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			results = append(results, items)
+			mu.Unlock()
+		}(q)
+	}
+	wg.Wait()
+
+	out := []SearchResult{}
+	seen := map[[2]any]bool{}
+	for _, items := range results {
+		for _, it := range items {
+			key := [2]any{it.RepositoryURL, it.Number}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			labels := make([]string, 0, len(it.Labels))
+			for _, l := range it.Labels {
+				labels = append(labels, l.Name)
+			}
+			out = append(out, SearchResult{
+				AccountID:    acc.ID,
+				AccountLabel: acc.Label,
+				Title:        it.Title,
+				HTMLURL:      it.HTMLURL,
+				Repository:   repoShort(it.RepositoryURL),
+				Number:       it.Number,
+				CreatedAt:    it.CreatedAt,
+				Labels:       labels,
+			})
+		}
+	}
+	return out
+}
+
+// GlobalSearch 跨账号搜索：每个账号用自己的 token 独立查询后合并去重。
+func GlobalSearch(accounts []config.Account, query, kind string) map[string]any {
+	if strings.TrimSpace(query) == "" {
+		return map[string]any{"results": []SearchResult{}, "total": 0, "accounts": 0}
+	}
+	var mu sync.Mutex
+	var all []SearchResult
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3)
+	for _, acc := range accounts {
+		wg.Add(1)
+		go func(acc config.Account) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			items := SearchAccount(acc, query, kind)
+			mu.Lock()
+			all = append(all, items...)
+			mu.Unlock()
+		}(acc)
+	}
+	wg.Wait()
+
+	sort.SliceStable(all, func(i, j int) bool { return all[i].CreatedAt > all[j].CreatedAt })
+	total := len(all)
+	if len(all) > 100 {
+		all = all[:100]
+	}
+	return map[string]any{"results": all, "total": total, "accounts": len(accounts)}
 }

@@ -306,3 +306,73 @@ async def fetch_all_summaries(accounts: list[dict[str, Any]]) -> list[dict[str, 
                 return result
 
     return await asyncio.gather(*(_limited(a) for a in accounts))
+
+
+# ------------------------------ 全局搜索 ------------------------------
+
+def repo_short(url: str) -> str:
+    """从 repository_url 提取 owner/repo。"""
+    parts = [p for p in (url or "").split("/") if p]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else (url or "")
+
+
+async def search_account_items(account: dict[str, Any], query: str, kind: str) -> list[dict[str, Any]]:
+    """在单个账号内按关键字搜索 PR / Issue。"""
+    token = account.get("token", "")
+    if not token or not query.strip():
+        return []
+    client = GitHubClient(token)
+    try:
+        user = await client.get_user()
+        login = user.get("login", account.get("username", ""))
+        queries: list[str] = []
+        if kind in ("all", "pr"):
+            queries.append(f"is:open is:pr author:{login} {query}")
+            queries.append(f"is:open is:pr review-requested:{login} {query}")
+        if kind in ("all", "issue"):
+            queries.append(f"is:open is:issue assignee:{login} {query}")
+        results = await asyncio.gather(
+            *(client.search(q, 30) for q in queries),
+            return_exceptions=True,
+        )
+        out: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for r in results:
+            if isinstance(r, BaseException):
+                continue
+            for it in _split(r)[1]:
+                key = (it.get("repository_url"), it.get("number"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    {
+                        "account_id": account["id"],
+                        "account_label": account.get("label") or account.get("username"),
+                        "title": it.get("title", ""),
+                        "html_url": it.get("html_url", ""),
+                        "repository": repo_short(it.get("repository_url", "")),
+                        "number": it.get("number"),
+                        "created_at": it.get("created_at", ""),
+                        "labels": [l.get("name", "") for l in it.get("labels", [])],
+                    }
+                )
+        return out
+    finally:
+        await client.aclose()
+
+
+async def global_search(accounts: list[dict[str, Any]], query: str, kind: str = "all") -> dict[str, Any]:
+    """跨账号搜索：每个账号用自己的 token 独立查询，合并去重。"""
+    if not query.strip():
+        return {"results": [], "total": 0, "accounts": 0}
+    results = await asyncio.gather(
+        *(search_account_items(a, query, kind) for a in accounts),
+        return_exceptions=True,
+    )
+    merged: list[dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, list):
+            merged.extend(r)
+    merged.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return {"results": merged[:100], "total": len(merged), "accounts": len(accounts)}

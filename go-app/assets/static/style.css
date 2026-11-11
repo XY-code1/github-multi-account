@@ -816,6 +816,85 @@ kbd {
   flex-wrap: wrap;
 }
 
+/* 账号分组 */
+
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 4px;
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.group-header:hover { color: var(--text); }
+
+.group-caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  transition: transform 0.15s;
+}
+
+/* 列表过滤 */
+
+.filter-bar {
+  margin-bottom: 10px;
+}
+
+.filter-bar input {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.filter-bar input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* 全局搜索 */
+
+.modal-lg { max-width: 720px; }
+
+.search-bar {
+  display: flex;
+  gap: 8px;
+}
+
+.search-bar input {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.search-bar input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.search-results {
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+
 /* ---------------- 模态框 ---------------- */
 
 .modal-overlay {
