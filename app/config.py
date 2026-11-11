@@ -3,17 +3,13 @@
 Token 使用本机密钥（config/.secret.key）加密存储，明文不落地。
 兼容旧版明文 token：首次加载时自动迁移为加密格式并写回。
 
-配置文件格式：
-    accounts:
-      - label: 主账号
-        username: XY-code1
-        token_encrypted: gAAAAAB...
-
-账号在列表中的位置即为其 id（从 1 开始）。
+写入采用「临时文件 + 原子替换」并保留 .bak，避免进程中途被杀
+（Ctrl+C / 断电 / --reload 重启）导致配置文件损坏、Token 全丢。
 """
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -29,23 +25,55 @@ ACCOUNTS_FILE = CONFIG_DIR / "accounts.yaml"
 
 _lock = Lock()
 
+# 内存缓存：避免每个请求都读盘 + 解密（文件 mtime 变化时自动失效）
+_cache: dict[str, Any] = {"mtime": None, "accounts": None}
+
+
+class ConfigError(Exception):
+    """配置无法读取（文件损坏 / 密钥丢失等）。"""
+
 
 def _ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_accounts() -> list[dict[str, Any]]:
-    """读取全部账号配置（自动解密 Token）。"""
-    if not ACCOUNTS_FILE.exists():
+    """读取全部账号配置（自动解密 Token，带内存缓存）。"""
+    try:
+        mtime = ACCOUNTS_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
         return []
+
+    with _lock:
+        if _cache["accounts"] is not None and _cache["mtime"] == mtime:
+            return [dict(a) for a in _cache["accounts"]]
+
     with ACCOUNTS_FILE.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        try:
+            data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            raise ConfigError(f"accounts.yaml 解析失败，文件可能已损坏：{e}") from e
+
+    raw_accounts = data.get("accounts") if isinstance(data, dict) else None
+    if raw_accounts is None:
+        raw_accounts = []
+    if not isinstance(raw_accounts, list):
+        raise ConfigError("accounts.yaml 格式不正确：accounts 必须是列表")
+
+    # 密钥丢失检测：存在密文但没有密钥文件时，拒绝继续，
+    # 避免生成新密钥后把无法解密的旧密文覆盖掉。
+    has_encrypted = any(isinstance(a, dict) and a.get("token_encrypted") for a in raw_accounts)
+    if has_encrypted and not (CONFIG_DIR / ".secret.key").exists():
+        raise ConfigError(
+            "检测到已加密的 Token，但密钥文件 config/.secret.key 缺失，无法解密。"
+            "请恢复密钥文件，或手动清空 accounts.yaml 后重新录入账号。"
+        )
 
     key: bytes | None = None
     plain_found = False
     accounts: list[dict[str, Any]] = []
-    for idx, acc in enumerate(data.get("accounts") or [], start=1):
-        acc = acc or {}
+    for idx, acc in enumerate(raw_accounts, start=1):
+        acc = acc if isinstance(acc, dict) else {}
         username = acc.get("username") or ""
         token = ""
         encrypted = acc.get("token_encrypted")
@@ -54,8 +82,11 @@ def load_accounts() -> list[dict[str, Any]]:
                 key = get_or_create_key(CONFIG_DIR)
             try:
                 token = decrypt_text(encrypted, key)
-            except Exception:
-                token = ""
+            except Exception as e:  # noqa: BLE001
+                raise ConfigError(
+                    "Token 解密失败：.secret.key 与 accounts.yaml 不匹配（密钥可能被替换）。"
+                    "请恢复原始密钥文件。"
+                ) from e
         elif acc.get("token"):
             token = acc["token"]
             plain_found = True
@@ -67,13 +98,22 @@ def load_accounts() -> list[dict[str, Any]]:
                 "token": token,
             }
         )
+
     if plain_found:
         save_accounts(accounts)
+        try:
+            mtime = ACCOUNTS_FILE.stat().st_mtime_ns
+        except OSError:
+            pass
+
+    with _lock:
+        _cache["mtime"] = mtime
+        _cache["accounts"] = [dict(a) for a in accounts]
     return accounts
 
 
 def save_accounts(accounts: list[dict[str, Any]]) -> None:
-    """全量写回账号配置（Token 加密存储）。"""
+    """全量写回账号配置（加密 + 原子替换 + 备份）。"""
     _ensure_config_dir()
     key = get_or_create_key(CONFIG_DIR)
     payload = {
@@ -86,8 +126,20 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
             for a in accounts
         ]
     }
-    with _lock, ACCOUNTS_FILE.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+    tmp_file = ACCOUNTS_FILE.with_name(ACCOUNTS_FILE.name + ".tmp")
+    with _lock:
+        with tmp_file.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        if ACCOUNTS_FILE.exists():
+            try:
+                shutil.copy2(ACCOUNTS_FILE, ACCOUNTS_FILE.with_name(ACCOUNTS_FILE.name + ".bak"))
+            except OSError:
+                pass
+        os.replace(tmp_file, ACCOUNTS_FILE)
+        _cache["mtime"] = None
+        _cache["accounts"] = None
 
 
 def add_account(label: str, username: str, token: str) -> dict[str, Any]:
@@ -142,18 +194,30 @@ def export_backup() -> dict[str, Any]:
 
 
 def import_backup(payload: dict[str, Any]) -> dict[str, Any]:
-    """从备份导入账号（同 username 覆盖）。"""
+    """从备份导入账号（同 username 覆盖）。输入不合法时抛 ValueError。"""
+    if not isinstance(payload, dict):
+        raise ValueError("备份格式不正确：应为 JSON 对象")
     items = payload.get("accounts") or []
+    if not isinstance(items, list):
+        raise ValueError("备份格式不正确：accounts 应为列表")
+
     accounts = load_accounts()
     added = updated = skipped = 0
     for item in items:
-        item = item or {}
-        username = (item.get("username") or "").strip()
-        token = item.get("token") or ""
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        username = item.get("username")
+        token = item.get("token")
+        if not isinstance(username, str) or not isinstance(token, str):
+            skipped += 1
+            continue
+        username = username.strip()
         if not username or not token:
             skipped += 1
             continue
-        label = item.get("label") or username
+        label = item.get("label")
+        label = label if isinstance(label, str) and label.strip() else username
         existing = next((a for a in accounts if a["username"] == username), None)
         if existing:
             existing["label"] = label

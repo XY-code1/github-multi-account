@@ -10,6 +10,10 @@ const state = {
   history: [],         // 当前账号的历史快照
   metric: "followers", // 趋势图当前指标
   timer: null,
+  notifications: false,      // 是否开启变化桌面提醒
+  previousCounts: {},        // 上一次各账号的 PR/Issue 计数（用于对比）
+  detailRequestId: 0,        // 详情请求代际，丢弃过期响应
+  historyRequestId: 0,       // 历史请求代际
 };
 
 // ---------------- 工具函数 ----------------
@@ -24,6 +28,15 @@ function repoName(url) {
   if (!url) return "";
   const parts = url.replace(/\/$/, "").split("/");
   return parts.slice(-2).join("/");
+}
+
+/** 只允许 http/https/相对路径，阻止 javascript: 等协议 */
+function safeUrl(url) {
+  const s = String(url || "").trim().toLowerCase();
+  if (s.startsWith("https://") || s.startsWith("http://") || s.startsWith("/")) {
+    return escapeHtml(url);
+  }
+  return "#";
 }
 
 function relTime(iso) {
@@ -44,7 +57,8 @@ function relTime(iso) {
 }
 
 function statusText(status) {
-  return { active: "有效", invalid: "无效", error: "异常", unknown: "未检查" }[status] || status;
+  const map = { active: "有效", invalid: "无效", error: "异常", unknown: "未检查" };
+  return escapeHtml(map[status] || status);
 }
 
 function showToast(msg) {
@@ -55,12 +69,24 @@ function showToast(msg) {
   showToast._t = setTimeout(() => toast.classList.add("hidden"), 2600);
 }
 
+// 头像加载失败时降级为占位图
+const AVATAR_FALLBACK =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'><rect width='40' height='40' rx='20' fill='#21262d'/></svg>"
+  );
+
+function handleImgError(img) {
+  img.onerror = null;
+  img.src = AVATAR_FALLBACK;
+}
+
 // ---------------- API ----------------
 
 async function api(path, options = {}) {
   const resp = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.detail || `请求失败（${resp.status}）`);
@@ -69,29 +95,70 @@ async function api(path, options = {}) {
 
 async function loadAccounts() {
   const data = await api("/api/status");
-  state.accounts = data.accounts || [];
+  const accounts = data.accounts || [];
+  checkNotifications(accounts);
+  state.accounts = accounts;
   renderAccountList();
   return state.accounts;
 }
 
+function checkNotifications(accounts) {
+  const current = Object.fromEntries(
+    accounts.map((a) => [a.id, { review: a.review_prs_count ?? 0, issues: a.assigned_issues_count ?? 0 }])
+  );
+  if (state.notifications) {
+    for (const a of accounts) {
+      const prev = state.previousCounts[a.id];
+      if (!prev) continue;
+      const review = current[a.id].review;
+      const issues = current[a.id].issues;
+      if (review > prev.review || issues > prev.issues) {
+        const parts = [];
+        if (review > prev.review) parts.push(`待处理 PR +${review - prev.review}`);
+        if (issues > prev.issues) parts.push(`分配 Issue +${issues - prev.issues}`);
+        try {
+          new Notification(`GitHub · ${a.label}`, { body: parts.join("，") });
+        } catch (e) { /* 某些环境不允许构造通知，忽略 */ }
+      }
+    }
+  }
+  state.previousCounts = current;
+}
+
 async function loadDetail(id) {
+  const reqId = ++state.detailRequestId;
   const data = await api(`/api/status/${id}`);
+  if (reqId !== state.detailRequestId) return; // 已有更新的请求，丢弃过期响应
   state.detail = data.account;
   renderDetail();
 }
 
+let refreshInFlight = false;
+
 async function refreshAll(selectFirstIfNone = false) {
+  if (refreshInFlight) return; // 防止定时刷新与手动刷新重叠
+  refreshInFlight = true;
   try {
     await loadAccounts();
+    // 账号被删除后 id 会重排，失效的选中要清空
+    if (state.selectedId && !state.accounts.some((a) => a.id === state.selectedId)) {
+      state.selectedId = null;
+      state.detail = null;
+      document.getElementById("detail").classList.add("hidden");
+      document.getElementById("emptyState").classList.remove("hidden");
+    }
     if (state.selectedId) {
       await loadDetail(state.selectedId);
     } else if (selectFirstIfNone && state.accounts.length) {
       selectAccount(state.accounts[0].id);
-      return;
+      updateLastRefresh();
+      return; // selectAccount 内部已加载详情
     }
     updateLastRefresh();
   } catch (e) {
     showToast(e.message);
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -128,10 +195,10 @@ function renderAccountList() {
   list.innerHTML = accounts.map((a) => {
     const user = a.user || {};
     const avatar = user.avatar_url
-      ? `<img class="account-avatar" src="${escapeHtml(user.avatar_url)}" alt="">`
+      ? `<img class="account-avatar" src="${escapeHtml(user.avatar_url)}" alt="" onerror="handleImgError(this)">`
       : `<div class="account-avatar account-avatar-placeholder">${escapeHtml((a.label || "?")[0])}</div>`;
     const counts = a.status === "active"
-      ? `<span>${a.review_prs.length} PR</span><span>·</span><span>${a.assigned_issues.length} Issue</span>`
+      ? `<span>${a.review_prs_count ?? 0} PR</span><span>·</span><span>${a.assigned_issues_count ?? 0} Issue</span>`
       : "";
     const err = a.error ? `<div class="account-user" style="color:var(--red)">${escapeHtml(a.error)}</div>` : "";
     return `
@@ -187,6 +254,14 @@ function renderDetail() {
   badge.className = `status-badge ${escapeHtml(d.status)}`;
   badge.innerHTML = `<span class="dot ${escapeHtml(d.status)}"></span>${statusText(d.status)}`;
 
+  // 部分数据获取失败的提示
+  const warnBox = document.getElementById("detailWarnings");
+  if (warnBox) {
+    warnBox.innerHTML = (d.warnings || []).length
+      ? `<div class="warn-bar">部分数据获取失败：${d.warnings.map(escapeHtml).join("、")}</div>`
+      : "";
+  }
+
   // 统计
   document.getElementById("statReview").textContent = d.review_prs.length;
   document.getElementById("statMyPr").textContent = d.my_prs.length;
@@ -209,6 +284,7 @@ function renderTab() {
       content.innerHTML = overviewHtml(d);
       bindMetricPills();
       bindSnapshotBtn();
+      bindExportHistoryBtn();
       loadHistory(d.id);
       break;
     case "review":
@@ -251,7 +327,7 @@ function overviewHtml(d) {
   const bars = topRepos.length
     ? `<div class="bar-chart">${topRepos.map((r) => `
         <div class="bar-row">
-          <a class="bar-label" href="${escapeHtml(r.html_url)}" target="_blank" rel="noopener" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</a>
+          <a class="bar-label" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</a>
           <div class="bar-track"><div class="bar-fill" style="width:${((r.stars / maxStars) * 100).toFixed(1)}%"></div></div>
           <span class="bar-value">★ ${r.stars}</span>
         </div>`).join("")}</div>`
@@ -270,7 +346,7 @@ function overviewHtml(d) {
 
   const avatarGrid = (list) => (list || []).length
     ? `<div class="avatar-grid">${list.map((u) => `
-        <a class="avatar-chip" href="${escapeHtml(u.html_url)}" target="_blank" rel="noopener" title="${escapeHtml(u.login)}">
+        <a class="avatar-chip" href="${safeUrl(u.html_url)}" target="_blank" rel="noopener" title="${escapeHtml(u.login)}">
           <img src="${escapeHtml(u.avatar_url)}" alt="" loading="lazy">${escapeHtml(u.login)}
         </a>`).join("")}</div>`
     : `<div class="empty-tab">暂无数据</div>`;
@@ -285,6 +361,7 @@ function overviewHtml(d) {
       <div id="trendContent"><div class="empty-tab">加载中...</div></div>
       <div class="trend-footer">
         <button id="snapshotBtn" class="btn">记录当前快照</button>
+        <button id="exportHistoryBtn" class="btn">导出 CSV</button>
         <span id="trendStats"></span>
       </div>
     </div>
@@ -354,7 +431,14 @@ function renderTrend() {
     if (stats) stats.textContent = "";
     return;
   }
-  const points = history.map((h) => ({ t: new Date(h.created_at).getTime(), v: h[conf.key] }));
+  const points = history
+    .map((h) => ({ t: new Date(h.created_at).getTime(), v: Number(h[conf.key]) || 0 }))
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v));
+  if (!points.length) {
+    box.innerHTML = `<div class="empty-tab">暂无有效历史数据</div>`;
+    if (stats) stats.textContent = "";
+    return;
+  }
   const first = history[0][conf.key];
   const last = history[history.length - 1][conf.key];
   const diff = last - first;
@@ -371,11 +455,15 @@ function renderTrend() {
 async function loadHistory(accountId) {
   const box = document.getElementById("trendContent");
   if (!box) return;
+  const reqId = ++state.historyRequestId;
   try {
     const data = await api(`/api/history/${accountId}?limit=300`);
+    if (reqId !== state.historyRequestId || accountId !== state.selectedId) return;
     state.history = data.history || [];
     renderTrend();
   } catch (e) {
+    if (reqId !== state.historyRequestId) return;
+    state.history = [];
     box.innerHTML = `<div class="empty-tab">无法加载历史数据</div>`;
   }
 }
@@ -406,13 +494,49 @@ async function takeSnapshot() {
   }
 }
 
+function bindExportHistoryBtn() {
+  const btn = document.getElementById("exportHistoryBtn");
+  if (btn) btn.addEventListener("click", exportHistory);
+}
+
+async function exportHistory() {
+  if (!state.detail) return;
+  try {
+    const data = await api(`/api/history/${state.detail.id}?limit=1000`);
+    const history = data.history || [];
+    if (!history.length) {
+      showToast("暂无历史数据");
+      return;
+    }
+    const headers = ["时间", "粉丝", "关注", "总Star", "公开仓库", "待处理PR", "我的PR", "分配Issue", "动态"];
+    const rows = history.map((h) => [
+      h.created_at, h.followers, h.following, h.total_stars, h.public_repos,
+      h.review_prs, h.my_prs, h.assigned_issues, h.events,
+    ]);
+    // \uFEFF 是 BOM，保证 Excel 正确识别 UTF-8
+    const csv = "\uFEFF" + [headers, ...rows].map((r) => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `github-history-${state.detail.username || state.detail.id}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast("历史已导出");
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
 function prList(items, note) {
   if (!items.length) return `<div class="empty-tab">${note ? "没有待处理的 PR" : "没有发起中的 PR"}</div>`;
   return `<div class="item-list">${items.map((it) => `
     <div class="item">
       <div class="item-icon pr">PR</div>
       <div class="item-body">
-        <a class="item-title" href="${escapeHtml(it.html_url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
+        <a class="item-title" href="${safeUrl(it.html_url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
         <div class="item-meta">
           <span class="repo-tag">${escapeHtml(repoName(it.repository_url))}</span>
           <span>#${it.number}</span>
@@ -430,7 +554,7 @@ function issueList(items) {
     <div class="item">
       <div class="item-icon issue">IS</div>
       <div class="item-body">
-        <a class="item-title" href="${escapeHtml(it.html_url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
+        <a class="item-title" href="${safeUrl(it.html_url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
         <div class="item-meta">
           <span class="repo-tag">${escapeHtml(repoName(it.repository_url))}</span>
           <span>#${it.number}</span>
@@ -488,7 +612,7 @@ function repoList(repos) {
     <div class="item">
       <div class="item-icon" style="background:var(--accent-soft);color:var(--accent)">◇</div>
       <div class="item-body">
-        <a class="item-title" href="${escapeHtml(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
+        <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
         <div class="item-meta">
           <span>★ ${r.stargazers_count ?? 0}</span>
           <span>⑂ ${r.forks_count ?? 0}</span>
@@ -505,7 +629,13 @@ function repoList(repos) {
 function selectAccount(id) {
   state.selectedId = id;
   renderAccountList();
-  loadDetail(id).catch((e) => showToast(e.message));
+  const loader = document.getElementById("detailLoading");
+  if (loader) loader.classList.remove("hidden");
+  loadDetail(id)
+    .catch((e) => showToast(e.message))
+    .finally(() => {
+      if (loader) loader.classList.add("hidden");
+    });
 }
 
 function clearSearch() {
@@ -565,6 +695,7 @@ function closeBackupModal() {
 }
 
 async function exportBackup() {
+  if (!confirm("备份文件包含 Token 明文，确定导出吗？")) return;
   try {
     const resp = await fetch("/api/accounts/export");
     if (!resp.ok) throw new Error("导出失败");
@@ -576,7 +707,7 @@ async function exportBackup() {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast("备份已导出");
   } catch (e) {
     showToast(e.message);
@@ -651,9 +782,50 @@ async function saveAccount() {
   }
 }
 
+// ---------------- 通知 / 刷新间隔 ----------------
+
+async function toggleNotifications() {
+  if (state.notifications) {
+    state.notifications = false;
+    updateNotifyBtn();
+    showToast("已关闭变化提醒");
+    return;
+  }
+  if (!("Notification" in window)) {
+    showToast("当前浏览器不支持桌面通知");
+    return;
+  }
+  if (Notification.permission === "denied") {
+    showToast("通知权限已在浏览器设置中被拒绝，请先允许");
+    return;
+  }
+  const perm = await Notification.requestPermission();
+  state.notifications = perm === "granted";
+  updateNotifyBtn();
+  showToast(state.notifications ? "已开启变化提醒" : "通知权限被拒绝");
+}
+
+function updateNotifyBtn() {
+  const btn = document.getElementById("notifyBtn");
+  if (!btn) return;
+  btn.classList.toggle("active", state.notifications);
+  btn.textContent = state.notifications ? "提醒·开" : "提醒";
+}
+
+function startRefreshTimer() {
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
+  }
+  const sec = Number(document.getElementById("refreshInterval").value);
+  if (sec > 0) state.timer = setInterval(() => refreshAll(), sec * 1000);
+}
+
 // ---------------- 事件绑定与启动 ----------------
 
 document.getElementById("refreshBtn").addEventListener("click", () => refreshAll());
+document.getElementById("notifyBtn").addEventListener("click", toggleNotifications);
+document.getElementById("refreshInterval").addEventListener("change", startRefreshTimer);
 document.getElementById("addBtn").addEventListener("click", openModal);
 document.getElementById("cancelBtn").addEventListener("click", closeModal);
 document.getElementById("saveBtn").addEventListener("click", saveAccount);
@@ -698,8 +870,8 @@ document.addEventListener("keydown", (e) => {
 
 async function init() {
   await refreshAll(true);
-  // 每 2 分钟自动刷新
-  state.timer = setInterval(() => refreshAll(), 120000);
+  startRefreshTimer();
+  updateNotifyBtn();
 }
 
 init().catch((e) => showToast(e.message));

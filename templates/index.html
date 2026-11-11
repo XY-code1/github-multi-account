@@ -21,6 +21,15 @@
     </div>
     <div class="topbar-actions">
       <span id="lastRefresh" class="last-refresh"></span>
+      <select id="refreshInterval" class="select-sm" title="自动刷新间隔">
+        <option value="30">30 秒</option>
+        <option value="60">1 分钟</option>
+        <option value="120" selected>2 分钟</option>
+        <option value="300">5 分钟</option>
+        <option value="600">10 分钟</option>
+        <option value="0">关闭</option>
+      </select>
+      <button id="notifyBtn" class="btn" title="开启变化桌面提醒">提醒</button>
       <button id="refreshBtn" class="btn" title="刷新全部账号">
         <span class="btn-icon">⟳</span> 刷新
       </button>
@@ -54,14 +63,20 @@
       </div>
 
       <div id="detail" class="detail hidden">
+        <div id="detailLoading" class="detail-loading hidden">
+          <span class="spinner"></span>
+          <span>加载中…</span>
+        </div>
         <div class="detail-header">
-          <img id="avatar" class="avatar" alt="avatar">
+          <img id="avatar" class="avatar" alt="avatar" onerror="handleImgError(this)">
           <div class="detail-id">
             <h2 id="detailName">—</h2>
             <p id="detailMeta" class="detail-meta">—</p>
           </div>
           <span id="statusBadge" class="status-badge">—</span>
         </div>
+
+        <div id="detailWarnings"></div>
 
         <div class="stats">
           <div class="stat-card">

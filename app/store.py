@@ -5,19 +5,23 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import Any, Iterator
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("GAD_DATA_DIR", BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "dashboard.db"
 
-_lock = Lock()
+# 可重入锁：save_snapshot 在库不存在时会再调用 init_db（同一把锁）
+_lock = RLock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -121,3 +125,42 @@ def get_stats(username: str) -> dict[str, Any]:
             (username,),
         ).fetchone()
     return {"count": row[0], "first": row[1], "last": row[2]}
+
+
+def delete_history(username: str) -> int:
+    """删除某账号的全部历史快照（账号被删除时调用）。"""
+    if not username or not DB_FILE.exists():
+        return 0
+    with _lock, _connect() as conn:
+        cur = conn.execute("DELETE FROM snapshots WHERE username=?", (username,))
+        return cur.rowcount
+
+
+def prune_snapshots(max_per_account: int = 1000, max_days: int = 90) -> dict[str, int]:
+    """清理过期与超量的历史快照，返回删除条数。
+
+    - 超过 max_days 天的记录
+    - 每个账号只保留最新的 max_per_account 条
+    """
+    if not DB_FILE.exists():
+        return {"deleted": 0}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_days)).isoformat()
+    with _lock, _connect() as conn:
+        expired = conn.execute("DELETE FROM snapshots WHERE created_at < ?", (cutoff,))
+        expired_count = expired.rowcount
+        if sqlite3.sqlite_version_info >= (3, 25):
+            overflow = conn.execute(
+                """DELETE FROM snapshots WHERE id IN (
+                       SELECT id FROM (
+                           SELECT id,
+                                  ROW_NUMBER() OVER (PARTITION BY username ORDER BY created_at DESC) AS rn
+                           FROM snapshots
+                       ) WHERE rn > ?
+                   )""",
+                (max_per_account,),
+            )
+            overflow_count = overflow.rowcount
+        else:
+            logger.warning("SQLite %s 不支持窗口函数，跳过超量快照清理", sqlite3.sqlite_version)
+            overflow_count = 0
+    return {"deleted": expired_count + overflow_count}

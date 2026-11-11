@@ -1,13 +1,40 @@
-"""账号状态聚合服务：为每个账号并发拉取登录态、PR、Issue、动态等。"""
+"""账号状态聚合服务。
+
+- fetch_account_summary：轻量汇总（侧栏用，4 个请求）
+- fetch_account_detail ：完整详情（详情页用，含仓库 / 粉丝 / 动态）
+- fetch_all_summaries  ：并发拉取全部账号汇总（带并发限流）
+
+容错原则：并发请求使用 return_exceptions=True，单个数据源失败
+只影响该字段（降级为空），不拖垮整个账号。
+"""
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from . import store
 from .config import mask_token
 from .github import GitHubClient, GitHubError
+
+logger = logging.getLogger(__name__)
+
+# 同时刷新的最大账号数，避免瞬间打满带宽 / 触发限流
+MAX_CONCURRENT_ACCOUNTS = 3
+
+_semaphore: asyncio.Semaphore | None = None
+_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """按需创建信号量，并在事件循环变化时重建（兼容测试）。"""
+    global _semaphore, _semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _semaphore is None or _semaphore_loop is not loop:
+        _semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
+        _semaphore_loop = loop
+    return _semaphore
 
 
 def _star_distribution(repos: list[dict]) -> list[dict[str, Any]]:
@@ -21,6 +48,75 @@ def _star_distribution(repos: list[dict]) -> list[dict[str, Any]]:
                 dist[label] += 1
                 break
     return [{"label": label, "count": count} for label, count in dist.items()]
+
+
+def _empty_result(account: dict[str, Any]) -> dict[str, Any]:
+    """所有字段都给默认值，前端不会因缺字段报错。"""
+    return {
+        "id": account["id"],
+        "label": account.get("label") or account.get("username"),
+        "username": account.get("username", ""),
+        "token_masked": mask_token(account.get("token", "")),
+        "status": "unknown",
+        "user": None,
+        "error": None,
+        "warnings": [],
+        "last_checked": datetime.now(timezone.utc).isoformat(),
+        "review_prs": [],
+        "my_prs": [],
+        "assigned_issues": [],
+        "events": [],
+        "repos": [],
+        "rate_limit": None,
+        "review_prs_count": 0,
+        "my_prs_count": 0,
+        "assigned_issues_count": 0,
+        "followers_count": 0,
+        "following_count": 0,
+        "public_repos": 0,
+        "total_stars": 0,
+        "top_repos": [],
+        "star_distribution": [],
+        "follower_list": [],
+        "following_list": [],
+    }
+
+
+async def _resolve_login(client: GitHubClient, account: dict[str, Any], result: dict[str, Any]) -> str | None:
+    """验证登录；成功返回 login，失败把错误写入 result 并返回 None。"""
+    try:
+        user = await client.get_user()
+    except GitHubError as e:
+        result["status"] = "invalid" if e.status == 401 else "error"
+        result["error"] = e.message
+        return None
+    except Exception as e:  # noqa: BLE001
+        result["status"] = "error"
+        result["error"] = f"请求失败：{e}"
+        return None
+    result["user"] = user
+    result["status"] = "active"
+    return user.get("login", account.get("username", ""))
+
+
+def _collect(results: list[Any], names: tuple[str, ...]) -> tuple[list[Any], list[str]]:
+    """把 gather 的结果拆成 (值列表, 失败名称列表)。"""
+    values: list[Any] = []
+    failed: list[str] = []
+    for name, value in zip(names, results):
+        if isinstance(value, BaseException):
+            values.append([])
+            failed.append(name)
+        else:
+            values.append(value)
+    return values, failed
+
+
+def _split(result: Any) -> tuple[int, list]:
+    """把搜索返回拆成 (真实总数, 条目)；失败时降级为 (0, [])。"""
+    if isinstance(result, tuple) and len(result) == 2:
+        return result[0], result[1]
+    return len(result or []), result or []
 
 
 async def verify_token(username: str, token: str) -> dict[str, Any]:
@@ -43,37 +139,10 @@ async def verify_token(username: str, token: str) -> dict[str, Any]:
         await client.aclose()
 
 
-async def fetch_account_status(account: dict[str, Any], force_record: bool = False) -> dict[str, Any]:
-    """拉取单个账号的完整状态。
-
-    先验证 token（get_user），成功后再并发拉取其余数据。
-    force_record=True 时忽略快照节流，强制记录一条历史。
-    """
+async def fetch_account_summary(account: dict[str, Any]) -> dict[str, Any]:
+    """轻量汇总：登录态 + PR/Issue 计数（侧栏用，约 4 个请求）。"""
     token = account.get("token", "")
-    result: dict[str, Any] = {
-        "id": account["id"],
-        "label": account.get("label") or account.get("username"),
-        "username": account.get("username", ""),
-        "token_masked": mask_token(token),
-        "status": "unknown",
-        "user": None,
-        "review_prs": [],
-        "my_prs": [],
-        "assigned_issues": [],
-        "events": [],
-        "repos": [],
-        "rate_limit": None,
-        "error": None,
-        "last_checked": datetime.now(timezone.utc).isoformat(),
-        "followers_count": 0,
-        "following_count": 0,
-        "public_repos": 0,
-        "total_stars": 0,
-        "top_repos": [],
-        "star_distribution": [],
-        "follower_list": [],
-        "following_list": [],
-    }
+    result = _empty_result(account)
     if not token:
         result["status"] = "invalid"
         result["error"] = "未配置 Token"
@@ -81,14 +150,53 @@ async def fetch_account_status(account: dict[str, Any], force_record: bool = Fal
 
     client = GitHubClient(token)
     try:
-        # 1) 验证登录
-        user = await client.get_user()
-        result["user"] = user
-        result["status"] = "active"
-        login = user.get("login", account.get("username", ""))
+        login = await _resolve_login(client, account, result)
+        if not login:
+            return result
 
-        # 2) 并发拉取其余数据
-        review_prs, my_prs, issues, events, repos, followers, following = await asyncio.gather(
+        results = await asyncio.gather(
+            client.review_requested_prs(login),
+            client.my_open_prs(login),
+            client.assigned_issues(login),
+            return_exceptions=True,
+        )
+        (review_res, mypr_res, issue_res), failed = _collect(
+            results, ("待处理 PR", "我的 PR", "分配 Issue")
+        )
+        if failed:
+            result["warnings"] = failed
+            logger.warning("账号 %s 汇总部分失败: %s", account.get("username"), ", ".join(failed))
+
+        review_total, review_prs = _split(review_res)
+        my_total, my_prs = _split(mypr_res)
+        issue_total, issues = _split(issue_res)
+        result["review_prs"] = review_prs
+        result["my_prs"] = my_prs
+        result["assigned_issues"] = issues
+        result["review_prs_count"] = review_total
+        result["my_prs_count"] = my_total
+        result["assigned_issues_count"] = issue_total
+    finally:
+        await client.aclose()
+    return result
+
+
+async def fetch_account_detail(account: dict[str, Any], force_record: bool = False) -> dict[str, Any]:
+    """完整详情：概览 / PR / Issue / 动态 / 仓库 / 粉丝。"""
+    token = account.get("token", "")
+    result = _empty_result(account)
+    if not token:
+        result["status"] = "invalid"
+        result["error"] = "未配置 Token"
+        return result
+
+    client = GitHubClient(token)
+    try:
+        login = await _resolve_login(client, account, result)
+        if not login:
+            return result
+
+        results = await asyncio.gather(
             client.review_requested_prs(login),
             client.my_open_prs(login),
             client.assigned_issues(login),
@@ -96,14 +204,30 @@ async def fetch_account_status(account: dict[str, Any], force_record: bool = Fal
             client.user_repos_all(login),
             client.get_followers(login),
             client.get_following(login),
+            return_exceptions=True,
         )
+        (review_res, mypr_res, issue_res, events, repos, followers, following), failed = _collect(
+            results,
+            ("待处理 PR", "我的 PR", "分配 Issue", "仓库动态", "仓库列表", "粉丝", "关注"),
+        )
+        if failed:
+            result["warnings"] = failed
+            logger.warning("账号 %s 详情部分失败: %s", account.get("username"), ", ".join(failed))
+
+        review_total, review_prs = _split(review_res)
+        my_total, my_prs = _split(mypr_res)
+        issue_total, issues = _split(issue_res)
         result["review_prs"] = review_prs
         result["my_prs"] = my_prs
         result["assigned_issues"] = issues
         result["events"] = events
         result["repos"] = repos[:30]
+        result["review_prs_count"] = review_total
+        result["my_prs_count"] = my_total
+        result["assigned_issues_count"] = issue_total
 
-        # 3) 粉丝 / 关注 / Star 统计
+        # 粉丝 / 关注 / Star 统计
+        user = result["user"] or {}
         result["followers_count"] = user.get("followers", 0)
         result["following_count"] = user.get("following", 0)
         result["public_repos"] = user.get("public_repos", 0)
@@ -136,13 +260,13 @@ async def fetch_account_status(account: dict[str, Any], force_record: bool = Fal
             for f in following[:50]
         ]
 
-        # 3) 速率限制（失败不影响主流程）
+        # 速率限制（失败不影响主流程）
         try:
             result["rate_limit"] = await client.rate_limit()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
-        # 4) 记录历史快照（默认 10 分钟节流，force_record 时忽略）
+        # 记录历史快照（默认 10 分钟节流，force_record 时忽略）
         store.save_snapshot(
             account.get("username", ""),
             {
@@ -150,25 +274,30 @@ async def fetch_account_status(account: dict[str, Any], force_record: bool = Fal
                 "following": result["following_count"],
                 "total_stars": result["total_stars"],
                 "public_repos": result["public_repos"],
-                "review_prs": len(result["review_prs"]),
-                "my_prs": len(result["my_prs"]),
-                "assigned_issues": len(result["assigned_issues"]),
-                "events": len(result["events"]),
+                "review_prs": len(review_prs),
+                "my_prs": len(my_prs),
+                "assigned_issues": len(issues),
+                "events": len(events),
             },
             force=force_record,
         )
-
-    except GitHubError as e:
-        result["status"] = "invalid" if e.status == 401 else "error"
-        result["error"] = e.message
-    except Exception as e:  # noqa: BLE001 - 兜底任何网络/解析异常
-        result["status"] = "error"
-        result["error"] = f"请求失败：{e}"
     finally:
         await client.aclose()
     return result
 
 
-async def fetch_all_status(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """并发拉取全部账号状态。"""
-    return await asyncio.gather(*(fetch_account_status(a) for a in accounts))
+async def fetch_all_summaries(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """并发拉取全部账号的汇总（带并发限流，单账号异常不影响其他账号）。"""
+
+    async def _limited(acc: dict[str, Any]) -> dict[str, Any]:
+        async with _get_semaphore():
+            try:
+                return await fetch_account_summary(acc)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("账号 %s 汇总失败", acc.get("username"))
+                result = _empty_result(acc)
+                result["status"] = "error"
+                result["error"] = f"汇总失败：{e}"
+                return result
+
+    return await asyncio.gather(*(_limited(a) for a in accounts))

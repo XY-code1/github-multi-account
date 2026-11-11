@@ -46,12 +46,12 @@ echo   Dashboard: http://localhost:%PORT%
 echo   Press Ctrl+C to stop.
 echo =========================================
 
-uvicorn app.main:app --reload --port %PORT%
+uvicorn app.main:app --reload --host 127.0.0.1 --port %PORT%
 if errorlevel 1 (
     echo.
     echo [WARN] Reload mode failed. Retrying without --reload ...
     echo.
     timeout /t 2 >nul
-    uvicorn app.main:app --port %PORT%
+    uvicorn app.main:app --host 127.0.0.1 --port %PORT%
 )
 pause

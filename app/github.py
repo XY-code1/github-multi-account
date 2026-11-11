@@ -4,9 +4,13 @@
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.github.com"
 
@@ -63,9 +67,13 @@ class GitHubClient:
 
     # ---------- 搜索 ----------
 
-    async def search(self, query: str, per_page: int = 30) -> list[dict]:
+    async def search(self, query: str, per_page: int = 30) -> tuple[int, list[dict]]:
+        """搜索 issue/PR，返回 (真实总数, 当前页条目)。
+
+        总数取自 total_count，避免用 len(items) 把计数截断成 per_page。
+        """
         data = await self._get("/search/issues", params={"q": query, "per_page": per_page})
-        return data.get("items", [])
+        return data.get("total_count", 0), data.get("items", [])
 
     async def review_requested_prs(self, login: str) -> list[dict]:
         """等待我 review 的开放 PR。"""
@@ -92,17 +100,37 @@ class GitHubClient:
             params={"sort": "updated", "direction": "desc", "per_page": per_page},
         )
 
-    async def user_repos_all(self, login: str, max_pages: int = 10) -> list[dict]:
-        """分页拉取该用户的公开仓库（用于统计 Star）。"""
+    async def _repo_page(self, login: str, page: int) -> list[dict]:
+        return await self._get(
+            f"/users/{login}/repos",
+            params={"sort": "updated", "direction": "desc", "per_page": 100, "page": page},
+        )
+
+    async def user_repos_all(self, login: str, max_pages: int = 10, concurrency: int = 5) -> list[dict]:
+        """并发分页拉取该用户的公开仓库（用于统计 Star）。
+
+        一次并发拉 concurrency 页；遇到不足 100 条的页或请求失败即停止。
+        """
         repos: list[dict] = []
-        for page in range(1, max_pages + 1):
-            batch = await self._get(
-                f"/users/{login}/repos",
-                params={"sort": "updated", "direction": "desc", "per_page": 100, "page": page},
+        page = 1
+        while page <= max_pages:
+            pages = list(range(page, min(page + concurrency, max_pages + 1)))
+            batches = await asyncio.gather(
+                *(self._repo_page(login, p) for p in pages),
+                return_exceptions=True,
             )
-            repos.extend(batch)
-            if len(batch) < 100:
+            stop = False
+            for batch in batches:
+                if isinstance(batch, BaseException):
+                    logger.warning("仓库分页请求失败（login=%s）: %s", login, batch)
+                    stop = True
+                    continue
+                repos.extend(batch)
+                if len(batch) < 100:
+                    stop = True
+            if stop:
                 break
+            page += concurrency
         return repos
 
     async def get_followers(self, login: str, per_page: int = 100) -> list[dict]:

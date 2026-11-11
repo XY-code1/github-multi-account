@@ -6,6 +6,9 @@ venv/
 
 # 真实账号配置（含加密后的 token），切勿提交
 config/accounts.yaml
+# 配置备份与临时文件
+config/accounts.yaml.bak
+config/accounts.yaml.tmp
 # 本机加密密钥，丢失后已保存的 token 将无法解密
 config/.secret.key
 
