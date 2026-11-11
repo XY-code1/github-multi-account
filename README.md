@@ -13,6 +13,15 @@
 
 ## 快速开始
 
+**一键启动（推荐）**：
+
+- Windows：双击 `start.bat`
+- macOS / Linux：终端执行 `./start.sh`
+
+脚本会自动创建 `.venv`、安装依赖、复制配置模板，并**自动探测可用端口**（Windows 上 Hyper-V / WSL / Docker 可能保留部分端口，直接写死 8000 会报 `WinError 10013`）。启动后按提示打开对应的 `http://localhost:<端口>`。
+
+**手动启动**：
+
 ```bash
 # 1. 安装依赖（建议虚拟环境）
 pip install -r requirements.txt
@@ -21,13 +30,11 @@ pip install -r requirements.txt
 cp config/accounts.example.yaml config/accounts.yaml
 # 编辑 accounts.yaml，填入你的 GitHub 用户名和 Token
 
-# 3. 启动
+# 3. 启动（端口被占用或不可用时换一个，如 8080）
 uvicorn app.main:app --reload --port 8000
 ```
 
-浏览器打开 <http://localhost:8000>。
-
-也可以在页面上点「添加账号」直接录入（支持「测试连接」，不会保存无效 Token）。
+浏览器打开提示的地址即可。也可以在页面上点「添加账号」直接录入（支持「测试连接」，不会保存无效 Token）。
 
 ## Token 权限
 
@@ -75,4 +82,6 @@ accounts:
 
 **触发速率限制？** 每个账号独立配额（认证后 5000 次/小时，搜索 30 次/分钟）。仪表盘对每个账号会发起 1 次用户 + 3 次搜索 + 3 次其他请求，多账号同时刷新时留意搜索配额。
 
-**端口冲突？** `--port` 换一个即可，例如 `--port 8080`。
+**端口冲突？** 换一个端口即可，例如 `uvicorn app.main:app --port 8080`，或运行 `start.bat 8080` 指定端口。
+
+**Windows 报 `WinError 10013`（访问套接字的权限不允许）？** 这不是端口被占用（那是 10048），而是 Hyper-V / WSL / Docker 预留了 TCP 端口段。用 `start.bat` 会自动跳过被保留的端口；也可用 `netsh interface ipv4 show excludedportrange protocol=tcp` 查看保留范围，或以管理员身份执行 `netsh int ipv4 add excludedportrange protocol=tcp startport=8000 numberofports=1` 释放 8000。
