@@ -7,7 +7,11 @@
 #   - Public Repository（或指定仓库）的 Pull requests / Issues / Contents / Metadata
 # 经典 token 则需要 repo:status、read:user 等 scope。
 #
-# 注意：accounts.yaml 已在 .gitignore 中，不会被提交。
+# 安全说明：Token 会以密文形式存储在本文件中（密钥为 config/.secret.key），
+# 明文不会写入。首次加载旧版明文配置时会自动迁移为加密格式。
+#
+# 注意：accounts.yaml 与 .secret.key 都已在 .gitignore 中，不会被提交。
+# 备份请用页面上的「备份」按钮导出（备份含明文，注意保管）。
 
 accounts:
   - label: 主账号            # 仪表盘上显示的名称

@@ -3,6 +3,9 @@
 一个本地 Web 仪表盘，用多个 GitHub PAT Token 管理多个账号，一屏查看每个账号的：
 
 - **登录有效性** —— Token 是否有效、是否过期、速率限制剩余
+- **数据概览** —— 粉丝 / 关注 / 总 Star 统计，仓库 Star 排行与分布可视化
+- **历史趋势** —— 自动记录状态快照（10 分钟节流），折线图看粉丝 / Star / PR 变化
+- **备份恢复** —— 一键导出 / 导入账号备份，Token 加密存储
 - **待处理 PR** —— 等待你 Review 的开放 PR
 - **我的 PR** —— 你发起的开放 PR 状态
 - **分配 Issue** —— 分配给你的开放 Issue
@@ -49,17 +52,20 @@ uvicorn app.main:app --reload --port 8000
 
 ## 配置格式
 
+`accounts.yaml` 中的 Token **以密文存储**（Fernet 对称加密，密钥为本机生成的 `config/.secret.key`），明文不会写入文件。首次加载旧版明文配置时会自动迁移为加密格式。
+
 ```yaml
 accounts:
   - label: 主账号            # 仪表盘显示名称
     username: XY-code1      # 仅用于展示，实际登录以 token 为准
-    token: ghp_xxxx
-  - label: 小号
-    username: yuzhoulab
-    token: ghp_xxxx
+    token_encrypted: gAAAAAB...   # 由程序自动生成，勿手动编辑
 ```
 
+你可以继续用 `token: ghp_xxxx` 明文书写（首次启动会自动加密迁移），也可以通过页面上的「添加账号」录入。
+
 可通过环境变量 `GAD_CONFIG_DIR` 指定配置目录（默认 `config/`）。
+
+> 🔑 **密钥丢失 = Token 全部失效**：`config/.secret.key` 丢失后，已加密的 Token 无法解密，需要重新录入。请把它和 `accounts.yaml` 一起备份（或直接用页面上的「备份」按钮导出明文备份）。
 
 ## API
 
@@ -71,10 +77,15 @@ accounts:
 | POST | `/api/verify` | 测试 Token 有效性（不保存） |
 | GET | `/api/status` | 全部账号状态摘要 |
 | GET | `/api/status/{id}` | 单个账号完整状态 |
+| GET | `/api/accounts/export` | 导出账号备份（含明文 Token） |
+| POST | `/api/accounts/import` | 从备份导入账号 |
+| GET | `/api/history/{id}` | 账号历史快照（时间升序） |
+| POST | `/api/snapshot/{id}` | 立即记录一条快照 |
 
 ## 技术栈
 
 - 后端：FastAPI + httpx（异步并发拉取）
+- 存储：SQLite（历史快照）+ Fernet 加密（Token 落盘）
 - 前端：原生 HTML/CSS/JS，GitHub 暗色主题，每 2 分钟自动刷新
 
 ## 常见问题
@@ -86,3 +97,7 @@ accounts:
 **端口冲突？** 换一个端口即可，例如 `uvicorn app.main:app --port 8080`，或运行 `start.bat 8080` 指定端口。
 
 **Windows 报 `WinError 10013`（访问套接字的权限不允许）？** 这不是端口被占用（那是 10048），而是 Hyper-V / WSL / Docker 预留了 TCP 端口段。用 `start.bat` 会自动跳过被保留的端口；也可用 `netsh interface ipv4 show excludedportrange protocol=tcp` 查看保留范围，或以管理员身份执行 `netsh int ipv4 add excludedportrange protocol=tcp startport=8000 numberofports=1` 释放 8000。
+
+**备份文件安全吗？** 页面导出的备份包含 **Token 明文**，请像密码一样保管（建议放在加密盘 / 密码管理器里）。日常使用时 Token 是加密存储的，明文只在导出备份时出现。
+
+**历史数据存在哪？** `data/dashboard.db`（SQLite），已在 `.gitignore` 中。删除该文件会清空所有历史趋势，但不影响账号配置。

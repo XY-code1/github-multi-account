@@ -9,21 +9,29 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, service
+from . import config, service, store
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
 
-app = FastAPI(title="GitHub 多账号状态仪表盘", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    store.init_db()
+    yield
+
+
+app = FastAPI(title="GitHub 多账号状态仪表盘", version="1.1.0", lifespan=lifespan)
 
 
 # ------------------------------ 请求模型 ------------------------------
@@ -120,6 +128,49 @@ async def verify_account(account_id: int) -> dict[str, Any]:
         "user": result["user"],
         "error": result["error"],
     }
+
+
+# ------------------------------ 备份 / 历史 ------------------------------
+
+@app.get("/api/accounts/export")
+async def export_accounts() -> JSONResponse:
+    """导出账号备份（含 Token 明文，请妥善保管）。"""
+    data = config.export_backup()
+    return JSONResponse(
+        data,
+        headers={"Content-Disposition": "attachment; filename=github-accounts-backup.json"},
+    )
+
+
+@app.post("/api/accounts/import")
+async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
+    """从备份导入账号（同 username 覆盖）。"""
+    return config.import_backup(payload)
+
+
+@app.get("/api/history/{account_id}")
+async def account_history(account_id: int, limit: int = 300) -> dict[str, Any]:
+    """账号历史快照（时间升序）。"""
+    accounts = config.load_accounts()
+    target = next((a for a in accounts if a["id"] == account_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    username = target.get("username", "")
+    return {
+        "history": store.get_history(username, limit),
+        "stats": store.get_stats(username),
+    }
+
+
+@app.post("/api/snapshot/{account_id}")
+async def take_snapshot(account_id: int) -> dict[str, Any]:
+    """立即拉取并强制记录一条快照（忽略节流）。"""
+    accounts = config.load_accounts()
+    target = next((a for a in accounts if a["id"] == account_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    result = await service.fetch_account_status(target, force_record=True)
+    return {"ok": True, "stats": store.get_stats(target.get("username", "")), "status": result["status"]}
 
 
 # ------------------------------ 前端页面 ------------------------------

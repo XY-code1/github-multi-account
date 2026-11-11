@@ -92,5 +92,26 @@ class GitHubClient:
             params={"sort": "updated", "direction": "desc", "per_page": per_page},
         )
 
+    async def user_repos_all(self, login: str, max_pages: int = 10) -> list[dict]:
+        """分页拉取该用户的公开仓库（用于统计 Star）。"""
+        repos: list[dict] = []
+        for page in range(1, max_pages + 1):
+            batch = await self._get(
+                f"/users/{login}/repos",
+                params={"sort": "updated", "direction": "desc", "per_page": 100, "page": page},
+            )
+            repos.extend(batch)
+            if len(batch) < 100:
+                break
+        return repos
+
+    async def get_followers(self, login: str, per_page: int = 100) -> list[dict]:
+        """该用户的粉丝列表。"""
+        return await self._get(f"/users/{login}/followers", params={"per_page": per_page})
+
+    async def get_following(self, login: str, per_page: int = 100) -> list[dict]:
+        """该用户关注的人。"""
+        return await self._get(f"/users/{login}/following", params={"per_page": per_page})
+
     async def rate_limit(self) -> dict:
         return await self._get("/rate_limit")
