@@ -3,15 +3,20 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github-multi-account/internal/config"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
 )
+
+// Version 是当前程序版本（构建时可覆盖）。
+var Version = "1.1.0"
 
 // Server 是 HTTP 服务。
 type Server struct {
@@ -60,9 +65,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/status/{id}", s.handleAccountStatus)
 	s.mux.HandleFunc("POST /api/accounts/{id}/verify", s.handleVerifyAccount)
 	s.mux.HandleFunc("GET /api/accounts/export", s.handleExport)
+	s.mux.HandleFunc("POST /api/accounts/export", s.handleExportPost)
 	s.mux.HandleFunc("POST /api/accounts/import", s.handleImport)
 	s.mux.HandleFunc("GET /api/history/{id}", s.handleHistory)
 	s.mux.HandleFunc("POST /api/snapshot/{id}", s.handleSnapshot)
+	s.mux.HandleFunc("GET /api/version", s.handleVersion)
+	s.mux.HandleFunc("GET /api/update-check", s.handleUpdateCheck)
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /static/", s.handleStatic)
 }
@@ -222,7 +230,7 @@ func (s *Server) handleVerifyAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	data, err := s.cfg.Export()
+	data, err := s.cfg.Export("")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
@@ -231,18 +239,92 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, data)
 }
 
+type exportIn struct {
+	Password string `json:"password"`
+}
+
+func (s *Server) handleExportPost(w http.ResponseWriter, r *http.Request) {
+	var in exportIn
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	data, err := s.cfg.Export(in.Password)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	filename := "github-accounts-backup.json"
+	if in.Password != "" {
+		filename = "github-accounts-backup-encrypted.json"
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	writeJSON(w, http.StatusOK, data)
+}
+
+type importIn struct {
+	Password   string `json:"password"`
+	Accounts   []any  `json:"accounts"`
+	Encrypted  bool   `json:"encrypted"`
+	Salt       string `json:"salt"`
+	Iterations int    `json:"iterations"`
+	Payload    string `json:"payload"`
+}
+
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
-	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var in importIn
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请求格式不正确"})
 		return
 	}
-	added, updated, skipped, err := s.cfg.Import(payload)
+	payload := map[string]any{
+		"encrypted":  in.Encrypted,
+		"salt":       in.Salt,
+		"iterations": in.Iterations,
+		"payload":    in.Payload,
+	}
+	if in.Accounts != nil {
+		payload["accounts"] = in.Accounts
+	}
+	added, updated, skipped, err := s.cfg.Import(payload, in.Password)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "updated": updated, "skipped": skipped})
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version": Version,
+		"repo":    "https://github.com/XY-code1/github-multi-account",
+	})
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/XY-code1/github-multi-account/releases/latest")
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "无法连接 GitHub"})
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     false,
+			"error":  fmt.Sprintf("GitHub 返回 %d（仓库可能是私有的，无法检查更新）", resp.StatusCode),
+			"latest": "",
+		})
+		return
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&rel)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"current": Version,
+		"latest":  rel.TagName,
+		"url":     rel.HTMLURL,
+	})
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {

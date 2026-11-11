@@ -176,6 +176,11 @@ async def fetch_account_summary(account: dict[str, Any]) -> dict[str, Any]:
         result["review_prs_count"] = review_total
         result["my_prs_count"] = my_total
         result["assigned_issues_count"] = issue_total
+        # 账号对比用的轻量指标（都来自 /user，无需额外请求）
+        user = result["user"] or {}
+        result["followers_count"] = user.get("followers", 0)
+        result["following_count"] = user.get("following", 0)
+        result["public_repos"] = user.get("public_repos", 0)
     finally:
         await client.aclose()
     return result

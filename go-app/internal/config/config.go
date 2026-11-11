@@ -261,8 +261,8 @@ func (s *Store) Delete(id int) (string, bool, error) {
 	return username, true, nil
 }
 
-// Export 导出明文备份。
-func (s *Store) Export() (map[string]any, error) {
+// Export 导出备份（password 非空时加密）。
+func (s *Store) Export(password string) (map[string]any, error) {
 	accounts, err := s.Accounts()
 	if err != nil {
 		return nil, err
@@ -275,16 +275,27 @@ func (s *Store) Export() (map[string]any, error) {
 			"token":    a.Token,
 		})
 	}
-	return map[string]any{
+	data := map[string]any{
 		"version":     1,
 		"app":         "github-multi-account",
 		"exported_at": time.Now().UTC().Format(time.RFC3339),
 		"accounts":    out,
-	}, nil
+	}
+	if password != "" {
+		return EncryptBackup(data, password)
+	}
+	return data, nil
 }
 
-// Import 从备份导入（同 username 覆盖）。
-func (s *Store) Import(payload map[string]any) (added, updated, skipped int, err error) {
+// Import 从备份导入（同 username 覆盖）。支持加密备份。
+func (s *Store) Import(payload map[string]any, password string) (added, updated, skipped int, err error) {
+	if enc, _ := payload["encrypted"].(bool); enc {
+		dec, decErr := DecryptBackup(payload, password)
+		if decErr != nil {
+			return 0, 0, 0, decErr
+		}
+		payload = dec
+	}
 	raw, ok := payload["accounts"]
 	if !ok {
 		return 0, 0, 0, errors.New("备份格式不正确：缺少 accounts 字段")

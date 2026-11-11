@@ -64,10 +64,8 @@ async def config_error_handler(request: Request, exc: config.ConfigError):
 
 # ------------------------------ 请求模型 ------------------------------
 
-class AccountIn(BaseModel):
-    label: str = ""
-    username: str
-    token: str
+class ExportIn(BaseModel):
+    password: str = ""
 
 
 # ------------------------------ 账号管理 ------------------------------
@@ -169,7 +167,7 @@ async def verify_account(account_id: int) -> dict[str, Any]:
 
 @app.get("/api/accounts/export")
 async def export_accounts() -> JSONResponse:
-    """导出账号备份（含 Token 明文，请妥善保管）。"""
+    """导出账号备份（明文，含 Token，请妥善保管）。"""
     data = config.export_backup()
     return JSONResponse(
         data,
@@ -177,11 +175,23 @@ async def export_accounts() -> JSONResponse:
     )
 
 
+@app.post("/api/accounts/export")
+async def export_accounts_encrypted(payload: ExportIn) -> JSONResponse:
+    """导出加密备份（password 非空时加密）。"""
+    data = config.export_backup(payload.password or None)
+    filename = "github-accounts-backup-encrypted.json" if payload.password else "github-accounts-backup.json"
+    return JSONResponse(
+        data,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @app.post("/api/accounts/import")
 async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
-    """从备份导入账号（同 username 覆盖）。"""
+    """从备份导入账号（同 username 覆盖）。支持加密备份。"""
+    password = payload.pop("password", "") or None
     try:
-        return config.import_backup(payload)
+        return config.import_backup(payload, password)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -11,7 +11,7 @@ const state = {
   metric: "followers", // 趋势图当前指标
   timer: null,
   notifications: false,      // 是否开启变化桌面提醒
-  previousCounts: {},        // 上一次各账号的 PR/Issue 计数（用于对比）
+  previousItems: {},         // 上一次各账号的 PR/Issue 明细（用于找出新增项）
   detailRequestId: 0,        // 详情请求代际，丢弃过期响应
   historyRequestId: 0,       // 历史请求代际
   accountsRequestId: 0,      // 账号列表请求代际
@@ -108,27 +108,51 @@ async function loadAccounts() {
   return state.accounts;
 }
 
+function issueKey(it) {
+  return `${it.repository_url || ""}#${it.number}`;
+}
+
 function checkNotifications(accounts) {
   const current = Object.fromEntries(
-    accounts.map((a) => [a.id, { review: a.review_prs_count ?? 0, issues: a.assigned_issues_count ?? 0 }])
+    accounts.map((a) => [
+      a.id,
+      {
+        reviewItems: (a.review_prs || []).map((it) => ({
+          key: issueKey(it),
+          repo: repoName(it.repository_url),
+        })),
+        issueItems: (a.assigned_issues || []).map((it) => ({
+          key: issueKey(it),
+          repo: repoName(it.repository_url),
+        })),
+      },
+    ])
   );
+
   if (state.notifications) {
     for (const a of accounts) {
-      const prev = state.previousCounts[a.id];
+      const prev = state.previousItems[a.id];
       if (!prev) continue;
-      const review = current[a.id].review;
-      const issues = current[a.id].issues;
-      if (review > prev.review || issues > prev.issues) {
+      const cur = current[a.id];
+      const prevReview = new Set(prev.reviewItems.map((x) => x.key));
+      const prevIssues = new Set(prev.issueItems.map((x) => x.key));
+      const newReview = cur.reviewItems.filter((x) => !prevReview.has(x.key));
+      const newIssues = cur.issueItems.filter((x) => !prevIssues.has(x.key));
+      if (newReview.length || newIssues.length) {
         const parts = [];
-        if (review > prev.review) parts.push(`待处理 PR +${review - prev.review}`);
-        if (issues > prev.issues) parts.push(`分配 Issue +${issues - prev.issues}`);
+        if (newReview.length) {
+          parts.push(`PR +${newReview.length}（${[...new Set(newReview.map((x) => x.repo))].join("、")}）`);
+        }
+        if (newIssues.length) {
+          parts.push(`Issue +${newIssues.length}（${[...new Set(newIssues.map((x) => x.repo))].join("、")}）`);
+        }
         try {
           new Notification(`GitHub · ${a.label}`, { body: parts.join("，") });
         } catch (e) { /* 某些环境不允许构造通知，忽略 */ }
       }
     }
   }
-  state.previousCounts = current;
+  state.previousItems = current;
 }
 
 let loadingTimer = null;
@@ -336,6 +360,11 @@ function renderTab() {
       bindExportHistoryBtn();
       loadHistory(d.id);
       break;
+    case "compare":
+      content.innerHTML = compareHtml();
+      bindCompareRows();
+      bindLoadStarsBtn();
+      break;
     case "review":
       content.innerHTML = prList(d.review_prs, "待我 Review");
       break;
@@ -430,6 +459,93 @@ function overviewHtml(d) {
       <h3>关注 <span class="muted">前 ${(d.following_list || []).length} 个</span></h3>
       ${avatarGrid(d.following_list)}
     </div>`;
+}
+
+const COMPARE_COLS = [
+  { key: "followers_count", label: "粉丝" },
+  { key: "following_count", label: "关注" },
+  { key: "public_repos", label: "公开仓库" },
+  { key: "review_prs_count", label: "待处理 PR" },
+  { key: "my_prs_count", label: "我的 PR" },
+  { key: "assigned_issues_count", label: "分配 Issue" },
+  { key: "total_stars", label: "总 Star" },
+];
+
+function compareHtml() {
+  const accounts = state.accounts;
+  if (!accounts.length) return `<div class="empty-tab">暂无账号</div>`;
+
+  const rows = accounts.map((a) => {
+    const star = state.detailCache[a.id] ? state.detailCache[a.id].total_stars : null;
+    const cells = COMPARE_COLS.map((c) => {
+      const v = c.key === "total_stars"
+        ? (star === null ? `<span class="muted">未加载</span>` : star)
+        : (a[c.key] ?? 0);
+      return `<td>${v}</td>`;
+    }).join("");
+    return `<tr>
+      <td><a href="#" data-account="${a.id}">${escapeHtml(a.label)}</a></td>
+      <td><span class="dot ${escapeHtml(a.status)}"></span> ${statusText(a.status)}</td>
+      ${cells}
+    </tr>`;
+  }).join("");
+
+  const maxFollowers = Math.max(1, ...accounts.map((a) => a.followers_count || 0));
+  const bars = accounts.map((a) => `
+    <div class="bar-row">
+      <span class="bar-label">${escapeHtml(a.label)}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${(((a.followers_count || 0) / maxFollowers) * 100).toFixed(1)}%"></div></div>
+      <span class="bar-value">${a.followers_count || 0}</span>
+    </div>`).join("");
+
+  return `
+    <div class="panel">
+      <h3>账号对比 <span class="muted">${accounts.length} 个账号</span></h3>
+      <div class="table-wrap">
+        <table class="compare-table">
+          <thead><tr><th>账号</th><th>状态</th>${COMPARE_COLS.map((c) => `<th>${c.label}</th>`).join("")}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>粉丝数对比</h3>
+      <div class="bar-chart">${bars}</div>
+    </div>
+    <div class="panel">
+      <h3>Star 对比 <span class="muted">需加载完整数据</span></h3>
+      <div id="compareStars"><div class="empty-tab">点击下方按钮加载各账号的仓库 Star 数据</div></div>
+      <div class="trend-footer"><button id="loadStarsBtn" class="btn">加载 Star 数据</button></div>
+    </div>`;
+}
+
+function bindCompareRows() {
+  document.querySelectorAll("#tabContent [data-account]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      selectAccount(Number(el.dataset.account));
+    });
+  });
+}
+
+async function loadAllStars() {
+  const btn = document.getElementById("loadStarsBtn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "加载中…";
+  }
+  for (const a of state.accounts) {
+    try {
+      const data = await api(`/api/status/${a.id}`);
+      state.detailCache[a.id] = data.account;
+    } catch (e) { /* 单个失败不影响其他 */ }
+  }
+  renderTab();
+}
+
+function bindLoadStarsBtn() {
+  const btn = document.getElementById("loadStarsBtn");
+  if (btn) btn.addEventListener("click", loadAllStars);
 }
 
 function lineChart(points, label) {
@@ -768,19 +884,26 @@ function closeBackupModal() {
 
 async function exportBackup() {
   if (!confirm("备份文件包含 Token 明文，确定导出吗？")) return;
+  const pwd = prompt("为备份设置密码（留空则不加密，密码不会保存在任何地方）", "");
+  if (pwd === null) return; // 用户取消
   try {
-    const resp = await fetch("/api/accounts/export");
+    const resp = await fetch("/api/accounts/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pwd }),
+    });
     if (!resp.ok) throw new Error("导出失败");
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `github-accounts-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const day = new Date().toISOString().slice(0, 10);
+    a.download = pwd ? `github-accounts-backup-encrypted-${day}.json` : `github-accounts-backup-${day}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast("备份已导出");
+    showToast(pwd ? "已导出加密备份" : "备份已导出");
   } catch (e) {
     showToast(e.message);
   }
@@ -791,9 +914,16 @@ async function importBackup(file) {
   try {
     const text = await file.text();
     const data = JSON.parse(text);
+    let password = "";
+    if (data.encrypted) {
+      const entered = prompt("该备份已加密，请输入密码", "");
+      if (entered === null) return; // 用户取消
+      password = entered;
+    }
+    const body = Object.assign({}, data, { password });
     const result = await api("/api/accounts/import", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify(body),
     });
     box.className = "test-result ok";
     box.textContent = `✓ 导入完成：新增 ${result.added} 个，更新 ${result.updated} 个${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`;
@@ -855,6 +985,50 @@ async function saveAccount() {
     await refreshAll();
   } catch (e) {
     showToast(e.message);
+  }
+}
+
+// ---------------- 版本 / 更新 ----------------
+
+async function loadVersion() {
+  try {
+    const v = await api("/api/version");
+    const btn = document.getElementById("versionBtn");
+    if (btn && v.version) {
+      btn.textContent = "v" + v.version;
+      btn.style.display = "";
+      btn.addEventListener("click", checkUpdate);
+    }
+  } catch (e) { /* 旧版后端没有该接口，忽略 */ }
+}
+
+function cmpVersion(a, b) {
+  const pa = String(a).replace(/^v/, "").split(".").map(Number);
+  const pb = String(b).replace(/^v/, "").split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
+
+async function checkUpdate() {
+  try {
+    const r = await api("/api/update-check");
+    if (!r.ok) {
+      showToast(r.error || "无法检查更新");
+      return;
+    }
+    const current = (document.getElementById("versionBtn").textContent || "").replace(/^v/, "");
+    if (r.latest && cmpVersion(r.latest, current) > 0) {
+      showToast(`有新版本 ${r.latest}，前往 GitHub 下载`);
+      if (r.url) window.open(r.url, "_blank");
+    } else {
+      showToast("已是最新版本");
+    }
+  } catch (e) {
+    showToast("检查更新失败");
   }
 }
 
@@ -1097,6 +1271,7 @@ async function init() {
   await refreshAll(true);
   startRefreshTimer();
   updateNotifyBtn();
+  loadVersion();
 }
 
 init().catch((e) => showToast(e.message));

@@ -186,7 +186,7 @@ func (s *Store) Prune(maxPerAccount, maxDays int) (int, error) {
 	if res, err := s.db.Exec(
 		`DELETE FROM snapshots WHERE id IN (
 		   SELECT id FROM (
-		     SELECT id, ROW_NUMBER() OVER (PARTITION BY username ORDER BY created_at DESC) AS rn
+		     SELECT id, ROW_NUMBER() OVER (PARTITION BY username ORDER BY id DESC) AS rn
 		     FROM snapshots
 		   ) WHERE rn > ?
 		 )`, maxPerAccount); err == nil {

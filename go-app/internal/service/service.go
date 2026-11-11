@@ -181,6 +181,10 @@ func (s *Service) Summary(acc config.Account) *Status {
 	st.ReviewPRsCount = reviewTotal
 	st.MyPRsCount = myTotal
 	st.AssignedIssuesCount = issueTotal
+	// 账号对比用的轻量指标（都来自 /user，无需额外请求）
+	st.FollowersCount = user.Followers
+	st.FollowingCount = user.Following
+	st.PublicRepos = user.PublicRepos
 	if len(failures) > 0 {
 		log.Printf("账号 %s 汇总部分失败: %v", acc.Username, failures)
 	}

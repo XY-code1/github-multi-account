@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-const apiBase = "https://api.github.com"
+// BaseURL 是 API 根地址，测试时可替换为 httptest 服务器。
+var BaseURL = "https://api.github.com"
 
 // Error 表示 GitHub API 返回的错误。
 type Error struct {
@@ -32,7 +33,7 @@ func New(token string) *Client {
 }
 
 func (c *Client) get(path string, params url.Values, out any) error {
-	u := apiBase + path
+	u := BaseURL + path
 	if len(params) > 0 {
 		u += "?" + params.Encode()
 	}

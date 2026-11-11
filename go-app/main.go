@@ -11,6 +11,7 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -40,12 +41,31 @@ func main() {
 	configDir := filepath.Join(base, "config")
 	dataDir := filepath.Join(base, "data")
 
-	if err := run(configDir, dataDir); err != nil {
+	err := run(configDir, dataDir)
+	switch {
+	case err == nil:
+		// 服务在后台 goroutine 中运行，主协程阻塞保持进程存活
+		select {}
+	case errors.Is(err, errAlreadyRunning):
+		// 已有实例在运行，浏览器已打开，正常退出
+	default:
 		showError(err)
 		os.Exit(1)
 	}
-	// 服务在后台 goroutine 中运行，主协程阻塞保持进程存活
-	select {}
+}
+
+// errAlreadyRunning 表示检测到已有实例在运行。
+var errAlreadyRunning = errors.New("already running")
+
+// isAppRunning 探测目标端口上是否已经是本应用。
+func isAppRunning(port int) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/accounts", port))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode == http.StatusOK
 }
 
 func baseDir() string {
@@ -83,6 +103,13 @@ func run(configDir, dataDir string) error {
 		return fmt.Errorf("加载前端资源失败: %w", err)
 	}
 	srv := server.New(cfg, svc, st, assetsSub)
+
+	// 已有实例在运行时，只打开浏览器，避免启动第二个服务
+	if p := readSavedPort(dataDir); p > 0 && isAppRunning(p) {
+		log.Printf("检测到已有实例运行在 :%d，仅打开浏览器", p)
+		openBrowser(fmt.Sprintf("http://localhost:%d", p))
+		return errAlreadyRunning
+	}
 
 	port := choosePort(dataDir)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

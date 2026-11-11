@@ -179,10 +179,10 @@ def mask_token(token: str) -> str:
     return f"{token[:4]}{'*' * 8}{token[-4:]}"
 
 
-def export_backup() -> dict[str, Any]:
-    """导出备份（含 Token 明文，请妥善保管）。"""
+def export_backup(password: str | None = None) -> dict[str, Any]:
+    """导出备份（含 Token 明文，请妥善保管）。提供密码时加密。"""
     accounts = load_accounts()
-    return {
+    data = {
         "version": 1,
         "app": "github-multi-account",
         "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -191,10 +191,19 @@ def export_backup() -> dict[str, Any]:
             for a in accounts
         ],
     }
+    if password:
+        from .backup import encrypt_backup
+
+        return encrypt_backup(data, password)
+    return data
 
 
-def import_backup(payload: dict[str, Any]) -> dict[str, Any]:
-    """从备份导入账号（同 username 覆盖）。输入不合法时抛 ValueError。"""
+def import_backup(payload: dict[str, Any], password: str | None = None) -> dict[str, Any]:
+    """从备份导入账号（同 username 覆盖）。"""
+    if payload.get("encrypted"):
+        from .backup import decrypt_backup
+
+        payload = decrypt_backup(payload, password or "")
     if not isinstance(payload, dict):
         raise ValueError("备份格式不正确：应为 JSON 对象")
     items = payload.get("accounts") or []

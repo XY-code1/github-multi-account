@@ -729,6 +729,41 @@ kbd {
   border-radius: 50%;
 }
 
+/* 账号对比 */
+
+.table-wrap { overflow-x: auto; }
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.compare-table th,
+.compare-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+}
+
+.compare-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.compare-table td:last-child,
+.compare-table th:last-child { padding-right: 4px; }
+
+.compare-table td:nth-child(n+3),
+.compare-table th:nth-child(n+3) { text-align: right; }
+
+.compare-table tr:hover td { background: var(--bg-tertiary); }
+
+.compare-table a { color: var(--text); font-weight: 600; }
+.compare-table a:hover { color: var(--accent); }
+
 /* 趋势图 */
 
 .metric-pills {
