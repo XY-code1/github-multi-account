@@ -6,6 +6,7 @@ const state = {
   selectedId: null,
   detail: null,        // 当前账号完整状态
   activeTab: "review",
+  searchQuery: "",     // 账号列表过滤关键字
   timer: null,
 };
 
@@ -96,14 +97,33 @@ async function refreshAll(selectFirstIfNone = false) {
 
 function renderAccountList() {
   const list = document.getElementById("accountList");
-  document.getElementById("accountCount").textContent = state.accounts.length;
+  const query = state.searchQuery.trim().toLowerCase();
+
+  const accounts = state.accounts.filter((a) => {
+    if (!query) return true;
+    const user = a.user || {};
+    return (
+      (a.label || "").toLowerCase().includes(query) ||
+      (a.username || "").toLowerCase().includes(query) ||
+      (user.login || "").toLowerCase().includes(query)
+    );
+  });
+
+  document.getElementById("accountCount").textContent = query
+    ? `${accounts.length}/${state.accounts.length}`
+    : state.accounts.length;
+  document.getElementById("clearSearch").classList.toggle("hidden", !query);
 
   if (!state.accounts.length) {
     list.innerHTML = `<div class="empty-tab">暂无账号</div>`;
     return;
   }
+  if (!accounts.length) {
+    list.innerHTML = `<div class="empty-tab">没有匹配的账号</div>`;
+    return;
+  }
 
-  list.innerHTML = state.accounts.map((a) => {
+  list.innerHTML = accounts.map((a) => {
     const user = a.user || {};
     const avatar = user.avatar_url
       ? `<img class="account-avatar" src="${escapeHtml(user.avatar_url)}" alt="">`
@@ -303,6 +323,13 @@ function selectAccount(id) {
   loadDetail(id).catch((e) => showToast(e.message));
 }
 
+function clearSearch() {
+  document.getElementById("searchInput").value = "";
+  state.searchQuery = "";
+  renderAccountList();
+  document.getElementById("searchInput").focus();
+}
+
 async function deleteAccount(id) {
   const acc = state.accounts.find((a) => a.id === id);
   if (!acc) return;
@@ -399,6 +426,18 @@ document.getElementById("addBtn").addEventListener("click", openModal);
 document.getElementById("cancelBtn").addEventListener("click", closeModal);
 document.getElementById("saveBtn").addEventListener("click", saveAccount);
 document.getElementById("testBtn").addEventListener("click", testConnection);
+
+document.getElementById("searchInput").addEventListener("input", (e) => {
+  state.searchQuery = e.target.value;
+  renderAccountList();
+});
+document.getElementById("searchInput").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    clearSearch();
+  }
+});
+document.getElementById("clearSearch").addEventListener("click", clearSearch);
 
 document.getElementById("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") closeModal();
