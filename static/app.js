@@ -14,6 +14,7 @@ const state = {
   previousCounts: {},        // 上一次各账号的 PR/Issue 计数（用于对比）
   detailRequestId: 0,        // 详情请求代际，丢弃过期响应
   historyRequestId: 0,       // 历史请求代际
+  accountsRequestId: 0,      // 账号列表请求代际
   highlightId: null,         // 键盘导航高亮的账号
 };
 
@@ -95,7 +96,9 @@ async function api(path, options = {}) {
 }
 
 async function loadAccounts() {
+  const reqId = ++state.accountsRequestId;
   const data = await api("/api/status");
+  if (reqId !== state.accountsRequestId) return state.accounts; // 过期响应，丢弃
   const accounts = data.accounts || [];
   checkNotifications(accounts);
   state.accounts = accounts;
@@ -135,27 +138,34 @@ async function loadDetail(id) {
 }
 
 let refreshInFlight = false;
+let refreshQueued = false;
 
 async function refreshAll(selectFirstIfNone = false) {
-  if (refreshInFlight) return; // 防止定时刷新与手动刷新重叠
+  // 若已有刷新在进行，标记「待刷新」：当前刷新结束后会再跑一次，
+  // 确保拿到本次增删改之后的最新数据（否则要等下一个定时周期）。
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
   refreshInFlight = true;
   try {
-    await loadAccounts();
-    // 账号被删除后 id 会重排，失效的选中要清空
-    if (state.selectedId && !state.accounts.some((a) => a.id === state.selectedId)) {
-      state.selectedId = null;
-      state.detail = null;
-      document.getElementById("detail").classList.add("hidden");
-      document.getElementById("emptyState").classList.remove("hidden");
-    }
-    if (state.selectedId) {
-      await loadDetail(state.selectedId);
-    } else if (selectFirstIfNone && state.accounts.length) {
-      selectAccount(state.accounts[0].id);
+    do {
+      refreshQueued = false;
+      await loadAccounts();
+      // 账号被删除后 id 会重排，失效的选中要清空
+      if (state.selectedId && !state.accounts.some((a) => a.id === state.selectedId)) {
+        state.selectedId = null;
+        state.detail = null;
+        document.getElementById("detail").classList.add("hidden");
+        document.getElementById("emptyState").classList.remove("hidden");
+      }
+      if (state.selectedId) {
+        await loadDetail(state.selectedId);
+      } else if (selectFirstIfNone && state.accounts.length) {
+        selectAccount(state.accounts[0].id);
+      }
       updateLastRefresh();
-      return; // selectAccount 内部已加载详情
-    }
-    updateLastRefresh();
+    } while (refreshQueued);
   } catch (e) {
     showToast(e.message);
   } finally {
@@ -651,12 +661,37 @@ function clearSearch() {
   document.getElementById("searchInput").focus();
 }
 
+/** 新增/更新账号后立即在侧栏反映（数据先留占位，刷新后补齐） */
+function upsertLocalAccount(acc) {
+  const existing = state.accounts.find((a) => a.id === acc.id);
+  if (existing) {
+    Object.assign(existing, acc);
+  } else {
+    state.accounts.push({
+      ...acc,
+      status: "unknown",
+      user: null,
+      error: null,
+      review_prs_count: 0,
+      my_prs_count: 0,
+      assigned_issues_count: 0,
+    });
+  }
+  renderAccountList();
+}
+function removeLocalAccount(id) {
+  state.accounts = state.accounts.filter((a) => a.id !== id);
+  renderAccountList();
+}
+
 async function deleteAccount(id) {
   const acc = state.accounts.find((a) => a.id === id);
   if (!acc) return;
   if (!confirm(`确定删除账号「${acc.label}」吗？`)) return;
   try {
     await api(`/api/accounts/${id}`, { method: "DELETE" });
+    // 乐观移除：立刻从侧栏消失
+    removeLocalAccount(id);
     if (state.selectedId === id) {
       state.selectedId = null;
       state.detail = null;
@@ -776,12 +811,15 @@ async function saveAccount() {
     return;
   }
   try {
-    await api("/api/accounts", {
+    const saved = await api("/api/accounts", {
       method: "POST",
       body: JSON.stringify({ label, username, token }),
     });
     showToast("已保存");
     closeModal();
+    // 乐观更新：立刻在侧栏看到，并切到新账号加载其详情
+    upsertLocalAccount(saved);
+    selectAccount(saved.id);
     await refreshAll();
   } catch (e) {
     showToast(e.message);
