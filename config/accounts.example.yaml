@@ -1,0 +1,19 @@
+# 账号配置示例
+# 复制为 accounts.yaml 后填入真实信息：
+#   cp config/accounts.example.yaml config/accounts.yaml
+#
+# token 获取方式：GitHub → Settings → Developer settings → Personal access tokens
+# 建议使用 fine-grained token，至少勾选以下权限（read）：
+#   - Public Repository（或指定仓库）的 Pull requests / Issues / Contents / Metadata
+# 经典 token 则需要 repo:status、read:user 等 scope。
+#
+# 注意：accounts.yaml 已在 .gitignore 中，不会被提交。
+
+accounts:
+  - label: 主账号            # 仪表盘上显示的名称
+    username: XY-code1      # GitHub 用户名（仅用于展示，登录验证以 token 为准）
+    token: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+  - label: 小号
+    username: yuzhoulab
+    token: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
