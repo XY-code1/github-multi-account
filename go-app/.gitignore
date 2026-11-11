@@ -4,3 +4,4 @@ GitHub仪表盘.exe
 
 # Go 构建缓存（如在本目录构建）
 /github-dashboard
+*.bak
