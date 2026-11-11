@@ -2,6 +2,10 @@
 GitHub仪表盘.exe
 *.exe
 
+# 运行时产生的配置与数据（测试残留也不许入库）
+config/
+data/
+
 # Go 构建缓存（如在本目录构建）
 /github-dashboard
 *.bak
