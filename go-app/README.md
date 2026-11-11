@@ -4,7 +4,7 @@
 
 ## 使用
 
-1. 把 `GitHub仪表盘.exe` 放到一个文件夹里（首次运行会自动创建 `config/` 和 `data/`）
+1. 把 `GitHub仪表盘.exe` 放到**项目根目录**（和 `config\` 文件夹同级），这样它和 Python 版共用同一份配置
 2. **双击 exe** —— 自动选端口、启动服务、打开浏览器，**没有黑色控制台窗口**
 3. 首次使用在页面右上角「添加账号」录入 Token，或直接编辑 `config/accounts.yaml`
 
@@ -12,7 +12,7 @@
 
 ### 从 Python 版迁移
 
-把 Python 版目录下的这两个文件复制到 exe 所在目录的 `config\` 里即可，**Token 不用重新录入**（Fernet 加密完全兼容）：
+exe 放在项目根目录时，直接读取项目 `config\` 里的 `accounts.yaml` 和 `.secret.key`，**Token 不用重新录入**。放在别的目录时，把这两个文件复制到 exe 同目录的 `config\` 里。
 
 ```
 config\accounts.yaml      （含加密后的 Token）

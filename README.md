@@ -28,7 +28,7 @@
 
 **单文件 exe 版（推荐分发给别人）**：
 
-直接双击 `go-app/GitHub仪表盘.exe` —— **无需 Python、无需安装任何依赖**，单文件、无控制台窗口、自动打开浏览器。从 Python 版迁移只需把 `config/accounts.yaml` 和 `config/.secret.key` 复制过去，Token 不用重录。详见 [go-app/README.md](go-app/README.md)。
+直接双击项目根目录的 **`GitHub仪表盘.exe`** —— **无需 Python、无需安装任何依赖**，单文件、无控制台窗口、自动打开浏览器。它和 Python 版共用同一份 `config/` 配置（账号、通知渠道、历史数据都在里面），Token 不用重录。详见 [go-app/README.md](go-app/README.md)。
 
 **自己开发 / 调试用 Python 版**：
 
