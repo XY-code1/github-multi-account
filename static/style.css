@@ -25,6 +25,29 @@
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* 浅色主题：只需覆盖变量 */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eef1f4;
+  --bg-hover: #e6e9ee;
+  --border: #d0d7de;
+  --border-light: #d8dee4;
+  --text: #1f2328;
+  --text-secondary: #59636e;
+  --text-muted: #818b98;
+  --accent: #0969da;
+  --accent-soft: rgba(9, 105, 218, 0.1);
+  --green: #1a7f37;
+  --green-soft: rgba(26, 127, 55, 0.12);
+  --red: #d1242f;
+  --red-soft: rgba(209, 36, 47, 0.1);
+  --yellow: #9a6700;
+  --yellow-soft: rgba(154, 103, 0, 0.12);
+  --purple: #8250df;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
@@ -265,6 +288,46 @@ a:hover { text-decoration: underline; }
 .account-card.selected {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.account-card.highlighted {
+  border-color: var(--text-muted);
+  box-shadow: 0 0 0 1px var(--text-muted);
+}
+
+/* 快捷键 */
+
+kbd {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  background: var(--bg-tertiary);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  min-width: 20px;
+  text-align: center;
+}
+
+.shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.shortcut-row span {
+  flex: 1;
 }
 
 .account-card.invalid { opacity: 0.75; }

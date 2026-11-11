@@ -14,6 +14,7 @@ const state = {
   previousCounts: {},        // 上一次各账号的 PR/Issue 计数（用于对比）
   detailRequestId: 0,        // 详情请求代际，丢弃过期响应
   historyRequestId: 0,       // 历史请求代际
+  highlightId: null,         // 键盘导航高亮的账号
 };
 
 // ---------------- 工具函数 ----------------
@@ -192,6 +193,10 @@ function renderAccountList() {
     return;
   }
 
+  if (state.highlightId == null && accounts.length) {
+    state.highlightId = state.selectedId ?? accounts[0].id;
+  }
+
   list.innerHTML = accounts.map((a) => {
     const user = a.user || {};
     const avatar = user.avatar_url
@@ -202,7 +207,7 @@ function renderAccountList() {
       : "";
     const err = a.error ? `<div class="account-user" style="color:var(--red)">${escapeHtml(a.error)}</div>` : "";
     return `
-      <div class="account-card ${a.id === state.selectedId ? "selected" : ""} ${a.status === "invalid" || a.status === "error" ? "invalid" : ""}"
+      <div class="account-card ${a.id === state.selectedId ? "selected" : ""} ${a.id === state.highlightId ? "highlighted" : ""} ${a.status === "invalid" || a.status === "error" ? "invalid" : ""}"
            data-id="${a.id}">
         ${avatar}
         <div class="account-info">
@@ -403,19 +408,19 @@ function lineChart(points, label) {
   for (let i = 0; i <= ticks; i++) {
     const v = minY + (spanY * i) / ticks;
     const y = py(v).toFixed(1);
-    grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#21262d" stroke-width="1"/>`;
-    grid += `<text x="${padL - 6}" y="${+y + 4}" text-anchor="end" font-size="10" fill="#6e7681">${Math.round(v)}</text>`;
+    grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke-width="1" style="stroke:var(--border-light)"/>`;
+    grid += `<text x="${padL - 6}" y="${+y + 4}" text-anchor="end" font-size="10" style="fill:var(--text-muted)">${Math.round(v)}</text>`;
   }
 
   const fmt = (t) => new Date(t).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
   const xLabels =
-    `<text x="${padL}" y="${h - 8}" font-size="10" fill="#6e7681">${fmt(minX)}</text>` +
-    `<text x="${w - padR}" y="${h - 8}" text-anchor="end" font-size="10" fill="#6e7681">${fmt(maxX)}</text>`;
+    `<text x="${padL}" y="${h - 8}" font-size="10" style="fill:var(--text-muted)">${fmt(minX)}</text>` +
+    `<text x="${w - padR}" y="${h - 8}" text-anchor="end" font-size="10" style="fill:var(--text-muted)">${fmt(maxX)}</text>`;
 
   return `<svg viewBox="0 0 ${w} ${h}" class="trend-chart" role="img" aria-label="${escapeHtml(label)}趋势">
     ${grid}
-    <path d="${area}" fill="rgba(88,166,255,0.12)" stroke="none"/>
-    <path d="${path}" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linejoin="round"/>
+    <path d="${area}" stroke="none" style="fill:var(--accent-soft)"/>
+    <path d="${path}" fill="none" stroke-width="2" stroke-linejoin="round" style="stroke:var(--accent)"/>
     ${xLabels}
   </svg>`;
 }
@@ -628,6 +633,7 @@ function repoList(repos) {
 
 function selectAccount(id) {
   state.selectedId = id;
+  state.highlightId = id;
   renderAccountList();
   const loader = document.getElementById("detailLoading");
   if (loader) loader.classList.remove("hidden");
@@ -821,6 +827,151 @@ function startRefreshTimer() {
   if (sec > 0) state.timer = setInterval(() => refreshAll(), sec * 1000);
 }
 
+// ---------------- 主题 ----------------
+
+const THEME_KEY = "gh-theme";
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById("themeBtn");
+  if (btn) btn.textContent = theme === "light" ? "◑" : "◐";
+}
+
+function toggleTheme() {
+  const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  const next = current === "light" ? "dark" : "light";
+  applyTheme(next);
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch (e) { /* 隐私模式下可能失败，忽略 */ }
+}
+
+function initTheme() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(THEME_KEY);
+  } catch (e) { /* ignore */ }
+  if (saved !== "light" && saved !== "dark") {
+    const prefersLight =
+      window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+    saved = prefersLight ? "light" : "dark";
+  }
+  applyTheme(saved);
+}
+
+// ---------------- 账号列表高亮（键盘导航用）----------------
+
+function getVisibleAccounts() {
+  const query = state.searchQuery.trim().toLowerCase();
+  if (!query) return state.accounts;
+  return state.accounts.filter((a) => {
+    const user = a.user || {};
+    return (
+      (a.label || "").toLowerCase().includes(query) ||
+      (a.username || "").toLowerCase().includes(query) ||
+      (user.login || "").toLowerCase().includes(query)
+    );
+  });
+}
+
+function moveHighlight(delta) {
+  const list = getVisibleAccounts();
+  if (!list.length) return;
+  const idx = list.findIndex((a) => a.id === state.highlightId);
+  const nextIdx =
+    idx === -1 ? (delta > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, idx + delta));
+  state.highlightId = list[nextIdx].id;
+  renderAccountList();
+  const card = document.querySelector(`.account-card[data-id="${state.highlightId}"]`);
+  if (card) card.scrollIntoView({ block: "nearest" });
+}
+
+function openHighlighted() {
+  if (state.highlightId) selectAccount(state.highlightId);
+}
+
+// ---------------- 快捷键 ----------------
+
+const TAB_ORDER = ["overview", "review", "mypr", "issues", "events", "repos"];
+
+function isTypingTarget() {
+  const el = document.activeElement;
+  return (
+    !!el &&
+    (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)
+  );
+}
+
+function anyModalOpen() {
+  return ["modal", "backupModal", "shortcutsModal"].some(
+    (id) => !document.getElementById(id).classList.contains("hidden")
+  );
+}
+
+function openShortcutsModal() {
+  document.getElementById("shortcutsModal").classList.remove("hidden");
+}
+
+function closeShortcutsModal() {
+  document.getElementById("shortcutsModal").classList.add("hidden");
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeModal();
+    closeBackupModal();
+    closeShortcutsModal();
+    return;
+  }
+  if (isTypingTarget()) return;
+  if (anyModalOpen()) return; // 弹窗打开时只响应 Esc
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  const key = e.key.toLowerCase();
+  if (key >= "1" && key <= "6") {
+    const tab = TAB_ORDER[Number(key) - 1];
+    if (tab) {
+      state.activeTab = tab;
+      renderTab();
+    }
+    return;
+  }
+
+  switch (key) {
+    case "t":
+      toggleTheme();
+      break;
+    case "r":
+      refreshAll();
+      break;
+    case "a":
+      openModal();
+      break;
+    case "/":
+      e.preventDefault();
+      document.getElementById("searchInput").focus();
+      break;
+    case "?":
+      e.preventDefault();
+      openShortcutsModal();
+      break;
+    case "j":
+    case "arrowdown":
+      e.preventDefault();
+      moveHighlight(1);
+      break;
+    case "k":
+    case "arrowup":
+      e.preventDefault();
+      moveHighlight(-1);
+      break;
+    case "enter":
+      e.preventDefault();
+      openHighlighted();
+      break;
+  }
+});
+
 // ---------------- 事件绑定与启动 ----------------
 
 document.getElementById("refreshBtn").addEventListener("click", () => refreshAll());
@@ -857,6 +1008,13 @@ document.getElementById("importFile").addEventListener("change", (e) => {
   if (e.target.files && e.target.files[0]) importBackup(e.target.files[0]);
 });
 
+document.getElementById("themeBtn").addEventListener("click", toggleTheme);
+document.getElementById("shortcutsBtn").addEventListener("click", openShortcutsModal);
+document.getElementById("shortcutsCloseBtn").addEventListener("click", closeShortcutsModal);
+document.getElementById("shortcutsModal").addEventListener("click", (e) => {
+  if (e.target.id === "shortcutsModal") closeShortcutsModal();
+});
+
 document.querySelectorAll("#tabs .tab").forEach((t) => {
   t.addEventListener("click", () => {
     state.activeTab = t.dataset.tab;
@@ -864,11 +1022,8 @@ document.querySelectorAll("#tabs .tab").forEach((t) => {
   });
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeModal();
-});
-
 async function init() {
+  initTheme();
   await refreshAll(true);
   startRefreshTimer();
   updateNotifyBtn();
