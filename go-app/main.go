@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/notify"
 	"github-multi-account/internal/server"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
@@ -38,10 +39,8 @@ var candidatePorts = []int{8000, 8080, 8888, 5000, 3000, 9000, 8001, 8081, 9090}
 
 func main() {
 	base := baseDir()
-	configDir := filepath.Join(base, "config")
-	dataDir := filepath.Join(base, "data")
 
-	err := run(configDir, dataDir)
+	err := run(base)
 	switch {
 	case err == nil:
 		// 服务在后台 goroutine 中运行，主协程阻塞保持进程存活
@@ -82,7 +81,10 @@ func baseDir() string {
 	return wd
 }
 
-func run(configDir, dataDir string) error {
+func run(base string) error {
+	configDir := filepath.Join(base, "config")
+	dataDir := filepath.Join(base, "data")
+
 	cfg, err := config.Open(configDir)
 	if err != nil {
 		return err
@@ -103,6 +105,15 @@ func run(configDir, dataDir string) error {
 		return fmt.Errorf("加载前端资源失败: %w", err)
 	}
 	srv := server.New(cfg, svc, st, assetsSub)
+	srv.SetBaseDir(base)
+
+	poller := notify.NewPoller(base, 5*time.Minute, cfg, svc)
+	srv.SetPoller(poller)
+	if len(notify.LoadChannels(base)) > 0 {
+		poller.Start()
+		log.Printf("外部通知轮询已启动")
+	}
+	defer poller.Stop()
 
 	// 已有实例在运行时，只打开浏览器，避免启动第二个服务
 	if p := readSavedPort(dataDir); p > 0 && isAppRunning(p) {

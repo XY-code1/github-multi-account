@@ -29,9 +29,22 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dev deps
+        run: pip install -r requirements-dev.txt
+
       - name: Run Go tests
         working-directory: go-app
         run: go test ./...
+
+      - name: Run Python tests
+        run: python -m pytest tests/ -q --ignore=tests/test_api_consistency.py
+
+      - name: Run API consistency test (Python vs Go)
+        run: python -m pytest tests/test_api_consistency.py -v
 
       - name: Build Windows exe
         run: |

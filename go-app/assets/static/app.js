@@ -19,6 +19,8 @@ const state = {
   detailCache: {},           // id -> 详情缓存：切回已看过的账号时秒开
   detailLoadingId: null,     // 当前正在加载详情的账号
   collapsedGroups: new Set(), // 折叠的账号分组
+  prefetchEnabled: true,     // 后台预取详情，让切换秒开
+  notifyChannels: [],        // 外部通知渠道
 };
 
 // ---------------- 工具函数 ----------------
@@ -106,7 +108,57 @@ async function loadAccounts() {
   checkNotifications(accounts);
   state.accounts = accounts;
   renderAccountList();
+  schedulePrefetch();
   return state.accounts;
+}
+
+// ---------------- 详情预取 ----------------
+
+let prefetchTimer = null;
+
+function schedulePrefetch() {
+  if (prefetchTimer) clearTimeout(prefetchTimer);
+  if (!state.prefetchEnabled) return;
+  // 延迟触发，避免和首屏加载抢带宽
+  prefetchTimer = setTimeout(() => {
+    prefetchTimer = null;
+    prefetchDetails().catch(() => {});
+  }, 2000);
+}
+
+async function prefetchDetails() {
+  const pending = state.accounts.filter((a) => a.status === "active" && !state.detailCache[a.id]);
+  if (!pending.length) return;
+  const queue = [...pending];
+  const workers = Array.from({ length: Math.min(2, queue.length) }, async () => {
+    for (;;) {
+      const acc = queue.shift();
+      if (!acc) return;
+      try {
+        const data = await api(`/api/status/${acc.id}`);
+        if (data.account) state.detailCache[acc.id] = data.account;
+      } catch (e) { /* 静默失败：预取只是锦上添花 */ }
+    }
+  });
+  await Promise.all(workers);
+}
+
+function togglePrefetch() {
+  state.prefetchEnabled = !state.prefetchEnabled;
+  if (!state.prefetchEnabled && prefetchTimer) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = null;
+  }
+  updatePrefetchBtn();
+  showToast(state.prefetchEnabled ? "已开启详情预取" : "已关闭详情预取");
+  if (state.prefetchEnabled) prefetchDetails().catch(() => {});
+}
+
+function updatePrefetchBtn() {
+  const btn = document.getElementById("prefetchBtn");
+  if (!btn) return;
+  btn.classList.toggle("active", state.prefetchEnabled);
+  btn.textContent = state.prefetchEnabled ? "预取·开" : "预取·关";
 }
 
 function issueKey(it) {
@@ -1173,6 +1225,120 @@ async function doGlobalSearch() {
   }
 }
 
+// ---------------- 外部通知设置 ----------------
+
+function maskUrl(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    return u.origin + "/***" + (u.search ? "?" + u.search.slice(0, 16) + "..." : "");
+  } catch (e) {
+    return url.length > 28 ? url.slice(0, 14) + "..." + url.slice(-6) : url;
+  }
+}
+
+async function openNotifyModal() {
+  document.getElementById("notifyModal").classList.remove("hidden");
+  document.getElementById("notifyResult").textContent = "";
+  await loadNotifyChannels();
+}
+
+async function loadNotifyChannels() {
+  try {
+    const data = await api("/api/notifications/settings");
+    state.notifyChannels = data.channels || [];
+    renderNotifyChannels();
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+function renderNotifyChannels() {
+  const box = document.getElementById("notifyChannels");
+  if (!state.notifyChannels.length) {
+    box.innerHTML = `<div class="empty-tab">还没有配置通知渠道，添加一个吧</div>`;
+    return;
+  }
+  box.innerHTML = state.notifyChannels
+    .map(
+      (c, i) => `
+    <div class="notify-row">
+      <span class="notify-name">${escapeHtml(c.name || c.type)}</span>
+      <span class="label-tag">${escapeHtml(c.type)}</span>
+      <span class="notify-url">${escapeHtml(maskUrl(c.url))}</span>
+      <label class="notify-enabled">
+        <input type="checkbox" data-notify-enable="${i}" ${c.enabled ? "checked" : ""}> 启用
+      </label>
+      <button class="btn" data-notify-del="${i}" title="删除该渠道">删除</button>
+    </div>`
+    )
+    .join("");
+
+  box.querySelectorAll("[data-notify-enable]").forEach((cb) => {
+    cb.addEventListener("change", async () => {
+      state.notifyChannels[Number(cb.dataset.notifyEnable)].enabled = cb.checked;
+      await saveNotifyChannels();
+    });
+  });
+  box.querySelectorAll("[data-notify-del]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      state.notifyChannels.splice(Number(btn.dataset.notifyDel), 1);
+      await saveNotifyChannels();
+      renderNotifyChannels();
+    });
+  });
+}
+
+async function saveNotifyChannels() {
+  try {
+    await api("/api/notifications/settings", {
+      method: "POST",
+      body: JSON.stringify({ channels: state.notifyChannels }),
+    });
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function addNotifyChannel() {
+  const type = document.getElementById("notifyType").value;
+  const name = document.getElementById("notifyName").value.trim() || type;
+  const url = document.getElementById("notifyUrl").value.trim();
+  if (!url) {
+    showToast("请填写推送 URL");
+    return;
+  }
+  state.notifyChannels.push({ type, name, url, enabled: true });
+  document.getElementById("notifyName").value = "";
+  document.getElementById("notifyUrl").value = "";
+  await saveNotifyChannels();
+  renderNotifyChannels();
+  showToast("已添加");
+}
+
+async function testNotification() {
+  const box = document.getElementById("notifyResult");
+  if (!state.notifyChannels.length) {
+    box.className = "test-result fail";
+    box.textContent = "请先添加通知渠道";
+    return;
+  }
+  box.className = "test-result";
+  box.textContent = "发送中…";
+  try {
+    const r = await api("/api/notifications/test", { method: "POST" });
+    box.className = "test-result ok";
+    box.textContent = `✓ 已发送到 ${r.sent} 个渠道，请在设备上确认`;
+  } catch (e) {
+    box.className = "test-result fail";
+    box.textContent = "发送失败：" + e.message;
+  }
+}
+
+function closeNotifyModal() {
+  document.getElementById("notifyModal").classList.add("hidden");
+}
+
 // ---------------- 通知 / 刷新间隔 ----------------
 
 async function toggleNotifications() {
@@ -1288,7 +1454,7 @@ function isTypingTarget() {
 }
 
 function anyModalOpen() {
-  return ["modal", "backupModal", "shortcutsModal", "searchModal"].some(
+  return ["modal", "backupModal", "shortcutsModal", "searchModal", "notifyModal"].some(
     (id) => !document.getElementById(id).classList.contains("hidden")
   );
 }
@@ -1307,6 +1473,7 @@ document.addEventListener("keydown", (e) => {
     closeBackupModal();
     closeShortcutsModal();
     closeSearchModal();
+    closeNotifyModal();
     return;
   }
   if (isTypingTarget()) return;
@@ -1407,8 +1574,15 @@ document.getElementById("shortcutsModal").addEventListener("click", (e) => {
   if (e.target.id === "shortcutsModal") closeShortcutsModal();
 });
 
-document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);
-document.getElementById("searchCloseBtn").addEventListener("click", closeSearchModal);
+document.getElementById("prefetchBtn").addEventListener("click", togglePrefetch);
+document.getElementById("notifyBtn").addEventListener("click", openNotifyModal);
+document.getElementById("notifyCloseBtn").addEventListener("click", closeNotifyModal);
+document.getElementById("notifyModal").addEventListener("click", (e) => {
+  if (e.target.id === "notifyModal") closeNotifyModal();
+});
+document.getElementById("notifyAddBtn").addEventListener("click", addNotifyChannel);
+document.getElementById("notifyTestBtn").addEventListener("click", testNotification);
+document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);document.getElementById("searchCloseBtn").addEventListener("click", closeSearchModal);
 document.getElementById("searchModal").addEventListener("click", (e) => {
   if (e.target.id === "searchModal") closeSearchModal();
 });
@@ -1431,6 +1605,7 @@ async function init() {
   await refreshAll(true);
   startRefreshTimer();
   updateNotifyBtn();
+  updatePrefetchBtn();
   loadVersion();
 }
 

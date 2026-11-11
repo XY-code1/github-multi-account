@@ -55,6 +55,21 @@ config\.secret.key        （本机密钥，必须一起复制）
 - 主题切换、键盘快捷键、变化桌面提醒
 - 版本号显示 + 更新检查
 
+## 外部通知
+
+即使**关闭浏览器**，也能在 PR / Issue 增加时收到推送。顶栏「通知」里配置渠道，可点「发送测试通知」验证。
+
+支持四种渠道（`config/settings.yaml`，配置后自动生效）：
+
+| type | 说明 | url 示例 |
+| --- | --- | --- |
+| `bark` | iOS Bark | `https://api.day.app/<你的key>` |
+| `webhook` | 通用 Webhook（POST JSON `{title, body, url}`） | `https://example.com/hook` |
+| `serverchan` | Server酱 | `https://sctapi.ftqq.com/<SENDKEY>.send` |
+| `wecom` | 企业微信机器人 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>` |
+
+程序后台每 5 分钟检查一次，只在数量**增加**时推送。配置文件已 gitignore。
+
 ## 从源码构建
 
 需要 [Go 1.22+](https://go.dev/dl/)。

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/notify"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
 )
@@ -20,11 +21,13 @@ var Version = "1.1.0"
 
 // Server 是 HTTP 服务。
 type Server struct {
-	cfg    *config.Store
-	svc    *service.Service
-	store  *store.Store
-	assets fs.FS
-	mux    *http.ServeMux
+	cfg     *config.Store
+	svc     *service.Service
+	store   *store.Store
+	assets  fs.FS
+	mux     *http.ServeMux
+	baseDir string
+	poller  *notify.Poller
 }
 
 // New 创建服务并注册路由。
@@ -33,6 +36,12 @@ func New(cfg *config.Store, svc *service.Service, st *store.Store, assets fs.FS)
 	s.routes()
 	return s
 }
+
+// SetBaseDir 设置配置根目录（通知渠道用）。
+func (s *Server) SetBaseDir(dir string) { s.baseDir = dir }
+
+// SetPoller 设置通知轮询器。
+func (s *Server) SetPoller(p *notify.Poller) { s.poller = p }
 
 // Handler 返回带 CSRF 防护的处理器。
 func (s *Server) Handler() http.Handler { return s.csrf(s.mux) }
@@ -72,6 +81,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/snapshot/{id}", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)
 	s.mux.HandleFunc("GET /api/update-check", s.handleUpdateCheck)
+	s.mux.HandleFunc("GET /api/notifications/settings", s.handleGetNotificationSettings)
+	s.mux.HandleFunc("POST /api/notifications/settings", s.handleSaveNotificationSettings)
+	s.mux.HandleFunc("POST /api/notifications/test", s.handleTestNotification)
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /static/", s.handleStatic)
 }
@@ -307,6 +319,50 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "updated": updated, "skipped": skipped})
+}
+
+func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channels": notify.LoadChannels(s.baseDir),
+		"types":    notify.ChannelTypes,
+	})
+}
+
+func (s *Server) handleSaveNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Channels []notify.Channel `json:"channels"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请求格式不正确"})
+		return
+	}
+	valid := make([]notify.Channel, 0, len(in.Channels))
+	for _, c := range in.Channels {
+		for _, t := range notify.ChannelTypes {
+			if c.Type == t {
+				valid = append(valid, c)
+				break
+			}
+		}
+	}
+	if err := notify.SaveChannels(s.baseDir, valid); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	if len(valid) > 0 && s.poller != nil && !s.poller.IsRunning() {
+		s.poller.Start()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channels": valid})
+}
+
+func (s *Server) handleTestNotification(w http.ResponseWriter, r *http.Request) {
+	channels := notify.LoadChannels(s.baseDir)
+	if len(channels) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请先配置通知渠道"})
+		return
+	}
+	n := notify.SendAll(channels, "GitHub 仪表盘", "这是一条测试通知，收到说明配置成功 ✓", "")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sent": n})
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {

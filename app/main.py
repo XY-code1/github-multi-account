@@ -19,9 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, service, store
+from . import config, notify, service, store
 
 logger = logging.getLogger("ghdashboard")
+
+# 外部通知轮询器（有渠道配置时才启动）
+poller = notify.NotificationPoller(interval_seconds=300)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -41,8 +44,12 @@ async def lifespan(app: FastAPI):
             logger.info("已清理历史快照 %d 条", pruned["deleted"])
     except Exception as e:  # noqa: BLE001
         logger.warning("快照清理失败: %s", e)
+    if notify.load_channels():
+        poller.start()
+        logger.info("外部通知轮询已启动")
     logger.info("GitHub 多账号仪表盘已启动")
     yield
+    await poller.stop()
 
 
 app = FastAPI(title="GitHub 多账号状态仪表盘", version="1.3.0", lifespan=lifespan)
@@ -172,11 +179,52 @@ async def verify_account(account_id: int) -> dict[str, Any]:
     }
 
 
+@app.get("/api/version")
+async def version() -> dict[str, Any]:
+    """当前程序版本与仓库地址。"""
+    return {
+        "version": "1.1.0",
+        "repo": "https://github.com/XY-code1/github-multi-account",
+    }
+
+
 @app.get("/api/search")
 async def search(q: str = "", kind: str = "all") -> dict[str, Any]:
     """跨账号搜索 PR / Issue 标题。kind: all | pr | issue"""
     accounts = config.load_accounts()
     return await service.global_search(accounts, q, kind)
+
+
+@app.get("/api/notifications/settings")
+async def get_notification_settings() -> dict[str, Any]:
+    """外部通知渠道配置。"""
+    return {"channels": notify.load_channels(), "types": list(notify.CHANNEL_TYPES)}
+
+
+class ChannelsIn(BaseModel):
+    channels: list[dict[str, Any]] = []
+
+
+@app.post("/api/notifications/settings")
+async def save_notification_settings(payload: ChannelsIn) -> dict[str, Any]:
+    channels = [
+        c for c in payload.channels
+        if isinstance(c, dict) and c.get("type") in notify.CHANNEL_TYPES
+    ]
+    notify.save_channels(channels)
+    if channels and not poller.is_running():
+        poller.start()
+    return {"ok": True, "channels": channels}
+
+
+@app.post("/api/notifications/test")
+async def test_notification() -> dict[str, Any]:
+    """向所有启用的渠道发送一条测试通知。"""
+    channels = notify.load_channels()
+    if not channels:
+        raise HTTPException(status_code=400, detail="请先配置通知渠道")
+    sent = await notify.send_all(channels, "GitHub 仪表盘", "这是一条测试通知，收到说明配置成功 ✓")
+    return {"ok": True, "sent": sent}
 
 
 # ------------------------------ 备份 / 历史 ------------------------------
