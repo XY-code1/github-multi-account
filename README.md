@@ -22,10 +22,13 @@
 
 **一键启动（推荐）**：
 
-- Windows：双击 `start.bat`
-- macOS / Linux：终端执行 `./start.sh`
+- **Windows（无黑框，推荐）**：双击 `Start-Hidden.vbs` —— 后台启动服务、自动打开浏览器，不显示控制台窗口
+- **Windows（可见控制台）**：双击 `start.bat`
+- **macOS / Linux**：终端执行 `./start.sh`
 
-脚本会自动创建 `.venv`、安装依赖、复制配置模板，并**自动探测可用端口**（Windows 上 Hyper-V / WSL / Docker 可能保留部分端口，直接写死 8000 会报 `WinError 10013`）。启动后按提示打开对应的 `http://localhost:<端口>`。
+脚本会自动创建 `.venv`、安装依赖、复制配置模板，并**自动探测可用端口**（Windows 上 Hyper-V / WSL / Docker 可能保留部分端口，直接写死 8000 会报 `WinError 10013`）。启动后自动打开 `http://localhost:<端口>`。
+
+**停止服务**：运行 `stop.bat`（结束所有以 `app.main` 启动的 Python 进程）。
 
 **手动启动**：
 
@@ -129,6 +132,8 @@ python -m pytest          # 运行测试套件
 | `app/store.py` | SQLite 快照存储、节流、清理 |
 | `static/app.js` | 前端全部逻辑 |
 | `find_port.py` | Windows 端口保留段探测 |
+| `Start-Hidden.vbs` | 无控制台窗口启动（双击运行） |
+| `stop.bat` | 停止后台服务 |
 
 ## 常见问题
 

@@ -16,6 +16,8 @@ const state = {
   historyRequestId: 0,       // 历史请求代际
   accountsRequestId: 0,      // 账号列表请求代际
   highlightId: null,         // 键盘导航高亮的账号
+  detailCache: {},           // id -> 详情缓存：切回已看过的账号时秒开
+  detailLoadingId: null,     // 当前正在加载详情的账号
 };
 
 // ---------------- 工具函数 ----------------
@@ -129,12 +131,44 @@ function checkNotifications(accounts) {
   state.previousCounts = current;
 }
 
+let loadingTimer = null;
+
+/** 延迟显示 loading：快速响应时不闪一下 */
+function showDetailLoading(id) {
+  clearTimeout(loadingTimer);
+  loadingTimer = setTimeout(() => {
+    if (state.detailLoadingId === id) {
+      document.getElementById("detailLoading").classList.remove("hidden");
+    }
+  }, 250);
+}
+
+function hideDetailLoading(id) {
+  clearTimeout(loadingTimer);
+  if (state.detailLoadingId !== id) return;
+  state.detailLoadingId = null;
+  document.getElementById("detailLoading").classList.add("hidden");
+}
+
 async function loadDetail(id) {
   const reqId = ++state.detailRequestId;
-  const data = await api(`/api/status/${id}`);
-  if (reqId !== state.detailRequestId) return; // 已有更新的请求，丢弃过期响应
-  state.detail = data.account;
-  renderDetail();
+  const cached = state.detailCache[id];
+  // 有缓存先秒开旧数据，再后台刷新
+  if (cached && state.detail?.id !== id) {
+    state.detail = cached;
+    renderDetail();
+  }
+  state.detailLoadingId = id;
+  if (!cached) showDetailLoading(id);
+  try {
+    const data = await api(`/api/status/${id}`);
+    if (reqId !== state.detailRequestId) return; // 已有更新的请求，丢弃过期响应
+    state.detailCache[id] = data.account;
+    state.detail = data.account;
+    renderDetail();
+  } finally {
+    hideDetailLoading(id);
+  }
 }
 
 let refreshInFlight = false;
@@ -645,13 +679,7 @@ function selectAccount(id) {
   state.selectedId = id;
   state.highlightId = id;
   renderAccountList();
-  const loader = document.getElementById("detailLoading");
-  if (loader) loader.classList.remove("hidden");
-  loadDetail(id)
-    .catch((e) => showToast(e.message))
-    .finally(() => {
-      if (loader) loader.classList.add("hidden");
-    });
+  loadDetail(id).catch((e) => showToast(e.message));
 }
 
 function clearSearch() {
@@ -663,6 +691,7 @@ function clearSearch() {
 
 /** 新增/更新账号后立即在侧栏反映（数据先留占位，刷新后补齐） */
 function upsertLocalAccount(acc) {
+  delete state.detailCache[acc.id]; // 账号可能改了 token，旧详情失效
   const existing = state.accounts.find((a) => a.id === acc.id);
   if (existing) {
     Object.assign(existing, acc);
@@ -679,7 +708,9 @@ function upsertLocalAccount(acc) {
   }
   renderAccountList();
 }
+
 function removeLocalAccount(id) {
+  delete state.detailCache[id];
   state.accounts = state.accounts.filter((a) => a.id !== id);
   renderAccountList();
 }
@@ -766,6 +797,7 @@ async function importBackup(file) {
     });
     box.className = "test-result ok";
     box.textContent = `✓ 导入完成：新增 ${result.added} 个，更新 ${result.updated} 个${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`;
+    state.detailCache = {}; // 导入可能改动账号，清空详情缓存
     await refreshAll();
   } catch (e) {
     box.className = "test-result fail";
