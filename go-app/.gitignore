@@ -1,0 +1,6 @@
+# 构建产物
+GitHub仪表盘.exe
+*.exe
+
+# Go 构建缓存（如在本目录构建）
+/github-dashboard

@@ -20,7 +20,11 @@
 
 ## 快速开始
 
-**一键启动（推荐）**：
+**单文件 exe 版（推荐分发给别人）**：
+
+直接双击 `go-app/GitHub仪表盘.exe` —— **无需 Python、无需安装任何依赖**，单文件、无控制台窗口、自动打开浏览器。从 Python 版迁移只需把 `config/accounts.yaml` 和 `config/.secret.key` 复制过去，Token 不用重录。详见 [go-app/README.md](go-app/README.md)。
+
+**自己开发 / 调试用 Python 版**：
 
 - **Windows（无黑框，推荐）**：双击 `Start-Hidden.vbs` —— 后台启动服务、自动打开浏览器，不显示控制台窗口
 - **Windows（可见控制台）**：双击 `start.bat`
