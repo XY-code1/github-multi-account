@@ -1,0 +1,214 @@
+"""后台同步引擎：定时同步所有账号，失败隔离 + 指数退避重试。
+
+设计要点（面向几百个账号）：
+- 并发限制（默认 3，可配置），避免瞬间打满带宽；
+- 单账号失败不影响其他账号；
+- 连续失败后按指数退避推迟重试（60s → 120s → 240s，上限 1 小时，带抖动）；
+- 同步结果写入 summaries 表，仪表盘读缓存，不实时请求 GitHub；
+- 记录 API 配额与同步状态，供"需要关注"判断使用。
+
+配置（config/settings.yaml）：
+    sync:
+      enabled: true
+      interval_seconds: 900
+      concurrency: 3
+      max_retries: 3
+      base_backoff_seconds: 60
+      max_backoff_seconds: 3600
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from . import config, db, service
+
+logger = logging.getLogger(__name__)
+
+DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "interval_seconds": 900,
+    "concurrency": 3,
+    "max_retries": 3,
+    "base_backoff_seconds": 60,
+    "max_backoff_seconds": 3600,
+}
+
+
+def save_settings(cfg: dict[str, Any]) -> None:
+    """持久化同步配置到 config/settings.yaml。"""
+    path = _settings_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump({"sync": cfg}, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _settings_file() -> Path:
+    return Path(config.CONFIG_DIR) / "settings.yaml"
+
+
+def load_settings() -> dict[str, Any]:
+    cfg = dict(DEFAULTS)
+    try:
+        if _settings_file().exists():
+            data = yaml.safe_load(_settings_file().read_text(encoding="utf-8")) or {}
+        else:
+            data = {}
+    except Exception:  # noqa: BLE001
+        data = {}
+    for k, v in (data.get("sync") or {}).items():
+        if k in DEFAULTS:
+            cfg[k] = v
+    return cfg
+
+
+class SyncEngine:
+    """后台同步引擎。"""
+
+    def __init__(self) -> None:
+        self.cfg = load_settings()
+        self._task: asyncio.Task | None = None
+        self._stop = asyncio.Event()
+        self.progress: dict[str, Any] = {
+            "status": "idle",
+            "total": 0,
+            "done": 0,
+            "failed": 0,
+            "started_at": None,
+            "finished_at": None,
+            "current": None,
+        }
+
+    def configure(self, settings: dict[str, Any]) -> None:
+        for k, v in settings.items():
+            if k in DEFAULTS:
+                self.cfg[k] = v
+
+    def is_running(self) -> bool:
+        return self._task is not None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._stop.clear()
+            self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=int(self.cfg["interval_seconds"]))
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.cfg["enabled"]:
+                try:
+                    await self.sync_all()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("同步周期失败: %s", e)
+
+    async def sync_all(self, only_ids: list[int] | None = None) -> dict[str, Any]:
+        accounts = config.load_accounts()
+        if only_ids:
+            accounts = [a for a in accounts if a["id"] in only_ids]
+        if not accounts:
+            return {"total": 0, "done": 0, "failed": 0}
+        sem = asyncio.Semaphore(max(1, int(self.cfg["concurrency"])))
+        self.progress = {
+            "status": "running",
+            "total": len(accounts),
+            "done": 0,
+            "failed": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "current": None,
+        }
+        results = await asyncio.gather(
+            *(self._guarded(sem, a) for a in accounts),
+            return_exceptions=True,
+        )
+        done = sum(1 for r in results if isinstance(r, dict) and r.get("ok"))
+        self.progress.update(
+            {
+                "status": "idle",
+                "done": done,
+                "failed": len(results) - done,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "current": None,
+            }
+        )
+        return {"total": len(accounts), "done": done, "failed": len(results) - done}
+
+    async def _guarded(self, sem: asyncio.Semaphore, acc: dict[str, Any]) -> dict[str, Any]:
+        async with sem:
+            self.progress["current"] = acc["username"]
+            r = await self.sync_account(acc)
+            self.progress["done"] += 1
+            return r
+
+    async def sync_account(self, acc: dict[str, Any]) -> dict[str, Any]:
+        """同步单个账号：失败隔离 + 指数退避。"""
+        aid, username = acc["id"], acc["username"]
+        state = db.get_sync_state(aid) or {}
+        if state.get("sync_enabled") is False:
+            return {"id": aid, "ok": False, "status": "skipped", "reason": "sync_disabled"}
+        nxt = state.get("next_retry_at")
+        if nxt:
+            try:
+                if datetime.now(timezone.utc) < datetime.fromisoformat(nxt):
+                    return {"id": aid, "ok": False, "status": "deferred", "retry_at": nxt}
+            except ValueError:
+                pass
+
+        summary = await service.fetch_account_summary(acc, include_events=True)
+        db.upsert_sync_state(
+            aid,
+            username,
+            last_sync_at=datetime.now(timezone.utc).isoformat(),
+            last_status=summary["status"],
+            last_error=summary.get("error"),
+            type=summary.get("type", "personal"),
+            group_name=summary.get("group_name", ""),
+            tags=summary.get("tags", []),
+        )
+        if summary["status"] == "active":
+            db.clear_sync_failure(aid)
+        else:
+            failures = int(state.get("consecutive_failures") or 0) + 1
+            backoff = min(
+                int(self.cfg["base_backoff_seconds"]) * (2 ** (failures - 1)),
+                int(self.cfg["max_backoff_seconds"]),
+            )
+            backoff = int(backoff * (0.5 + random.random()))
+            next_retry = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).isoformat()
+            db.upsert_sync_state(
+                aid, username, consecutive_failures=failures, next_retry_at=next_retry
+            )
+
+        core = (summary.get("rate_limit") or {}).get("resources", {}).get("core", {})
+        if core:
+            db.upsert_rate_limit(
+                aid,
+                username,
+                int(core.get("remaining", 0)),
+                int(core.get("limit", 0)),
+                None,
+            )
+        db.upsert_summary(aid, username, summary)
+        return {"id": aid, "ok": summary["status"] == "active", "status": summary["status"]}

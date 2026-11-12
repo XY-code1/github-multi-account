@@ -57,6 +57,10 @@ def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _lock, _connect() as conn:
         conn.executescript(SCHEMA)
+    # 运维中心的新表（同步状态 / 配额 / 审计 / 元数据）
+    from . import db as ops_db
+
+    ops_db.init_db()
 
 
 def save_snapshot(username: str, metrics: dict[str, Any], force: bool = False) -> bool:

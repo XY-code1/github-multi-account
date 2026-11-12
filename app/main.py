@@ -19,12 +19,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, notify, service, store
+from . import config, dashboard, db, notify, service, store, sync
+from .query import query_accounts
 
 logger = logging.getLogger("ghdashboard")
 
 # 外部通知轮询器（有渠道配置时才启动）
 poller = notify.NotificationPoller(interval_seconds=300)
+
+# 后台同步引擎（有账号时启动）
+sync_engine = sync.SyncEngine()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -47,9 +51,18 @@ async def lifespan(app: FastAPI):
     if notify.load_channels():
         poller.start()
         logger.info("外部通知轮询已启动")
+    if config.load_accounts():
+        try:
+            db.rebuild_meta(config.load_accounts())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("重建账号元数据失败: %s", e)
+        sync_engine.start()
+        logger.info("后台同步引擎已启动（间隔 %ss，并发 %s）",
+                    sync_engine.cfg["interval_seconds"], sync_engine.cfg["concurrency"])
     logger.info("GitHub 多账号仪表盘已启动")
     yield
     await poller.stop()
+    await sync_engine.stop()
 
 
 app = FastAPI(title="GitHub 多账号状态仪表盘", version="1.3.0", lifespan=lifespan)
@@ -84,25 +97,6 @@ class ExportIn(BaseModel):
 
 # ------------------------------ 账号管理 ------------------------------
 
-@app.get("/api/accounts")
-async def list_accounts() -> dict[str, Any]:
-    """账号列表（不含 token 原文）。"""
-    accounts = config.load_accounts()
-    return {
-        "accounts": [
-            {
-                "id": a["id"],
-                "label": a["label"],
-                "username": a["username"],
-                "group": a.get("group", ""),
-                "token_masked": config.mask_token(a["token"]),
-                "has_token": bool(a["token"]),
-            }
-            for a in accounts
-        ]
-    }
-
-
 @app.post("/api/accounts")
 async def create_account(payload: AccountIn) -> dict[str, Any]:
     """新增或更新账号（同 username 覆盖）。"""
@@ -111,6 +105,7 @@ async def create_account(payload: AccountIn) -> dict[str, Any]:
     if not payload.token:
         raise HTTPException(status_code=400, detail="token 不能为空")
     acc = config.add_account(payload.label, payload.username, payload.token, payload.group or "")
+    db.audit("accounts.create", acc["id"], acc["username"], "新增/更新账号")
     return {
         "id": acc["id"],
         "label": acc["label"],
@@ -131,6 +126,7 @@ async def remove_account(account_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="账号不存在")
     if username:
         store.delete_history(username)
+    db.audit("accounts.delete", account_id, username, "删除账号")
     return {"ok": True}
 
 
@@ -193,6 +189,137 @@ async def search(q: str = "", kind: str = "all") -> dict[str, Any]:
     """跨账号搜索 PR / Issue 标题。kind: all | pr | issue"""
     accounts = config.load_accounts()
     return await service.global_search(accounts, q, kind)
+
+
+# ------------------------------ 运维中心 ------------------------------
+
+@app.get("/api/dashboard/summary")
+async def dashboard_summary() -> dict[str, Any]:
+    """全局账号总览。"""
+    return dashboard.build_summary()
+
+
+@app.get("/api/dashboard/tasks")
+async def dashboard_tasks() -> dict[str, Any]:
+    """统一待办（按优先级排序）。"""
+    tasks = dashboard.build_tasks()
+    return {
+        "tasks": tasks,
+        "total": len(tasks),
+        "high": sum(1 for t in tasks if t["priority"] == "high"),
+        "medium": sum(1 for t in tasks if t["priority"] == "medium"),
+        "low": sum(1 for t in tasks if t["priority"] == "low"),
+    }
+
+
+@app.get("/api/dashboard/activities")
+async def dashboard_activities(type: str = "all", limit: int = 100) -> dict[str, Any]:
+    """跨账号最近动态。type: all | pr | issue | account"""
+    limit = max(1, min(limit, 500))
+    return {"activities": dashboard.build_activities(limit, type)}
+
+
+@app.get("/api/accounts")
+async def list_accounts(
+    page: int = 1,
+    pageSize: int = 50,
+    query: str = "",
+    status: str = "",
+    type: str = "",
+    group: str = "",
+    tags: str = "",
+    sort: str = "last_activity",
+    order: str = "desc",
+) -> dict[str, Any]:
+    """账号列表（服务端分页 / 搜索 / 筛选 / 排序）。"""
+    return query_accounts(
+        page=page,
+        page_size=pageSize,
+        query=query,
+        status=status,
+        type_=type,
+        group=group,
+        tags=tags,
+        sort=sort,
+        order=order,
+    )
+
+
+@app.post("/api/accounts/batch-refresh")
+async def batch_refresh(payload: dict[str, Any]) -> dict[str, Any]:
+    """批量刷新指定账号。"""
+    ids = payload.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 必须是非空列表")
+    db.audit("accounts.batch_refresh", detail=f"批量刷新 {len(ids)} 个账号")
+    result = await sync_engine.sync_all(only_ids=[int(i) for i in ids])
+    return {"ok": True, **result}
+
+
+@app.post("/api/accounts/{account_id}/sync")
+async def sync_one_account(account_id: int) -> dict[str, Any]:
+    """立即同步单个账号。"""
+    accounts = config.load_accounts()
+    target = next((a for a in accounts if a["id"] == account_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    result = await sync_engine.sync_account(target)
+    db.audit("accounts.sync", account_id=account_id, username=target["username"], detail="手动同步")
+    return result
+
+
+@app.get("/api/tasks")
+async def tasks_status() -> dict[str, Any]:
+    """同步引擎进度与配置。"""
+    return {
+        "progress": sync_engine.progress,
+        "config": sync_engine.cfg,
+        "running": sync_engine.is_running(),
+        "states": db.all_sync_states(),
+    }
+
+
+@app.get("/api/audit")
+async def audit_log(limit: int = 100, action: str = "") -> dict[str, Any]:
+    """审计日志。"""
+    limit = max(1, min(limit, 500))
+    return {"items": db.list_audit(limit, action or None)}
+
+
+class SyncSettingsIn(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = None
+    concurrency: int | None = None
+    max_retries: int | None = None
+    base_backoff_seconds: int | None = None
+    max_backoff_seconds: int | None = None
+
+
+@app.post("/api/sync/settings")
+async def save_sync_settings(payload: SyncSettingsIn) -> dict[str, Any]:
+    """配置后台同步（并发、间隔、退避）。"""
+    mapping = {
+        "enabled": "enabled",
+        "interval_seconds": "interval_seconds",
+        "concurrency": "concurrency",
+        "max_retries": "max_retries",
+        "base_backoff_seconds": "base_backoff_seconds",
+        "max_backoff_seconds": "max_backoff_seconds",
+    }
+    settings = {mapping[k]: v for k, v in payload.model_dump().items() if v is not None}
+    if settings:
+        sync_engine.configure(settings)
+        sync.save_settings(sync_engine.cfg)
+        db.audit("sync.settings", detail="更新同步配置")
+    return {"ok": True, "config": sync_engine.cfg}
+
+
+@app.post("/api/sync/run")
+async def run_sync_now() -> dict[str, Any]:
+    """立即触发一次全量同步。"""
+    result = await sync_engine.sync_all()
+    db.audit("sync.run", detail="手动触发全量同步")
+    return {"ok": True, **result}
 
 
 @app.get("/api/notifications/settings")

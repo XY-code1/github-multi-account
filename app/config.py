@@ -90,12 +90,19 @@ def load_accounts() -> list[dict[str, Any]]:
         elif acc.get("token"):
             token = acc["token"]
             plain_found = True
+        tags = acc.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
         accounts.append(
             {
                 "id": idx,
                 "label": acc.get("label") or username or f"账号 {idx}",
                 "username": username,
                 "group": acc.get("group") or "",
+                "type": acc.get("type") or "personal",
+                "alias": acc.get("alias") or "",
+                "note": acc.get("note") or "",
+                "tags": tags,
                 "token": token,
             }
         )
@@ -123,6 +130,10 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
                 "label": a.get("label", ""),
                 "username": a.get("username", ""),
                 "group": a.get("group", ""),
+                "type": a.get("type", "personal"),
+                "alias": a.get("alias", ""),
+                "note": a.get("note", ""),
+                "tags": a.get("tags", []),
                 "token_encrypted": encrypt_text(a.get("token", ""), key),
             }
             for a in accounts
@@ -144,18 +155,32 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
         _cache["accounts"] = None
 
 
-def add_account(label: str, username: str, token: str, group: str = "") -> dict[str, Any]:
+def add_account(
+    label: str,
+    username: str,
+    token: str,
+    group: str = "",
+    type_: str = "personal",
+    alias: str = "",
+    note: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
     accounts = load_accounts()
+    fields = {
+        "label": label or username,
+        "token": token,
+        "group": group,
+        "type": type_ if type_ in ("personal", "bot", "org") else "personal",
+        "alias": alias,
+        "note": note,
+        "tags": tags or [],
+    }
     for acc in accounts:
         if acc["username"] == username and username:
-            acc["label"] = label or acc["label"]
-            acc["token"] = token
-            acc["group"] = group
+            acc.update(fields)
             save_accounts(accounts)
             return acc
-    accounts.append(
-        {"id": len(accounts) + 1, "label": label or username, "username": username, "group": group, "token": token}
-    )
+    accounts.append({"id": len(accounts) + 1, "username": username, **fields})
     for idx, acc in enumerate(accounts, start=1):
         acc["id"] = idx
     save_accounts(accounts)
@@ -190,7 +215,16 @@ def export_backup(password: str | None = None) -> dict[str, Any]:
         "app": "github-multi-account",
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "accounts": [
-            {"label": a["label"], "username": a["username"], "group": a.get("group", ""), "token": a["token"]}
+            {
+                "label": a["label"],
+                "username": a["username"],
+                "group": a.get("group", ""),
+                "type": a.get("type", "personal"),
+                "alias": a.get("alias", ""),
+                "note": a.get("note", ""),
+                "tags": a.get("tags", []),
+                "token": a["token"],
+            }
             for a in accounts
         ],
     }
@@ -232,14 +266,41 @@ def import_backup(payload: dict[str, Any], password: str | None = None) -> dict[
         label = label if isinstance(label, str) and label.strip() else username
         group = item.get("group")
         group = group.strip() if isinstance(group, str) else ""
+        atype = item.get("type")
+        atype = atype if atype in ("personal", "bot", "org") else "personal"
+        alias = item.get("alias")
+        alias = alias if isinstance(alias, str) else ""
+        note = item.get("note")
+        note = note if isinstance(note, str) else ""
+        tags = item.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        elif not isinstance(tags, list):
+            tags = []
         existing = next((a for a in accounts if a["username"] == username), None)
         if existing:
             existing["label"] = label
             existing["token"] = token
             existing["group"] = group
+            existing["type"] = atype
+            existing["alias"] = alias
+            existing["note"] = note
+            existing["tags"] = tags
             updated += 1
         else:
-            accounts.append({"id": 0, "label": label, "username": username, "group": group, "token": token})
+            accounts.append(
+                {
+                    "id": 0,
+                    "label": label,
+                    "username": username,
+                    "group": group,
+                    "type": atype,
+                    "alias": alias,
+                    "note": note,
+                    "tags": tags,
+                    "token": token,
+                }
+            )
             added += 1
     if added or updated:
         for idx, acc in enumerate(accounts, start=1):

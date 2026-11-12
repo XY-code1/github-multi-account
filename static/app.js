@@ -1,29 +1,7 @@
-/* GitHub 多账号状态仪表盘 —— 前端逻辑 */
+/* GitHub 多账号运维中心 —— 前端逻辑 */
 "use strict";
 
-const state = {
-  accounts: [],        // 账号列表（含状态摘要）
-  selectedId: null,
-  detail: null,        // 当前账号完整状态
-  activeTab: "overview",
-  searchQuery: "",     // 账号列表过滤关键字
-  history: [],         // 当前账号的历史快照
-  metric: "followers", // 趋势图当前指标
-  timer: null,
-  notifications: false,      // 是否开启变化桌面提醒
-  previousItems: {},         // 上一次各账号的 PR/Issue 明细（用于找出新增项）
-  detailRequestId: 0,        // 详情请求代际，丢弃过期响应
-  historyRequestId: 0,       // 历史请求代际
-  accountsRequestId: 0,      // 账号列表请求代际
-  highlightId: null,         // 键盘导航高亮的账号
-  detailCache: {},           // id -> 详情缓存：切回已看过的账号时秒开
-  detailLoadingId: null,     // 当前正在加载详情的账号
-  collapsedGroups: new Set(), // 折叠的账号分组
-  prefetchEnabled: true,     // 后台预取详情，让切换秒开
-  notifyChannels: [],        // 外部通知渠道
-};
-
-// ---------------- 工具函数 ----------------
+// ---------------- 工具 ----------------
 
 function escapeHtml(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({
@@ -31,19 +9,18 @@ function escapeHtml(str) {
   }[c]));
 }
 
-function repoName(url) {
-  if (!url) return "";
-  const parts = url.replace(/\/$/, "").split("/");
-  return parts.slice(-2).join("/");
-}
-
-/** 只允许 http/https/相对路径，阻止 javascript: 等协议 */
 function safeUrl(url) {
   const s = String(url || "").trim().toLowerCase();
   if (s.startsWith("https://") || s.startsWith("http://") || s.startsWith("/")) {
     return escapeHtml(url);
   }
   return "#";
+}
+
+function repoName(url) {
+  if (!url) return "";
+  const parts = (url || "").replace(/\/$/, "").split("/");
+  return parts.slice(-2).join("/");
 }
 
 function relTime(iso) {
@@ -63,9 +40,9 @@ function relTime(iso) {
   return `${Math.floor(m / 12)} 年前`;
 }
 
-function statusText(status) {
-  const map = { active: "有效", invalid: "无效", error: "异常", unknown: "未检查" };
-  return escapeHtml(map[status] || status);
+function statusText(s) {
+  const map = { active: "正常", invalid: "失效", error: "异常", warning: "警告", sync_failed: "同步失败", sync_stale: "长期未同步", unknown: "未检查" };
+  return escapeHtml(map[s] || s);
 }
 
 function showToast(msg) {
@@ -76,19 +53,16 @@ function showToast(msg) {
   showToast._t = setTimeout(() => toast.classList.add("hidden"), 2600);
 }
 
-// 头像加载失败时降级为占位图
 const AVATAR_FALLBACK =
   "data:image/svg+xml," +
   encodeURIComponent(
-    "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'><rect width='40' height='40' rx='20' fill='#21262d'/></svg>"
+    "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'><rect width='40' height='40' rx='20' fill='#eaeef2'/></svg>"
   );
 
 function handleImgError(img) {
   img.onerror = null;
   img.src = AVATAR_FALLBACK;
 }
-
-// ---------------- API ----------------
 
 async function api(path, options = {}) {
   const resp = await fetch(path, {
@@ -100,460 +74,476 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function loadAccounts() {
-  const reqId = ++state.accountsRequestId;
-  const data = await api("/api/status");
-  if (reqId !== state.accountsRequestId) return state.accounts; // 过期响应，丢弃
-  const accounts = data.accounts || [];
-  checkNotifications(accounts);
-  state.accounts = accounts;
-  renderAccountList();
-  schedulePrefetch();
-  return state.accounts;
+// ---------------- 主题 ----------------
+
+const THEME_KEY = "gh-theme";
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById("themeBtn");
+  if (btn) btn.textContent = theme === "dark" ? "◑" : "◐";
 }
 
-// ---------------- 详情预取 ----------------
-
-let prefetchTimer = null;
-
-function schedulePrefetch() {
-  if (prefetchTimer) clearTimeout(prefetchTimer);
-  if (!state.prefetchEnabled) return;
-  // 延迟触发，避免和首屏加载抢带宽
-  prefetchTimer = setTimeout(() => {
-    prefetchTimer = null;
-    prefetchDetails().catch(() => {});
-  }, 2000);
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const next = cur === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* ignore */ }
 }
 
-async function prefetchDetails() {
-  const pending = state.accounts.filter((a) => a.status === "active" && !state.detailCache[a.id]);
-  if (!pending.length) return;
-  const queue = [...pending];
-  const workers = Array.from({ length: Math.min(2, queue.length) }, async () => {
-    for (;;) {
-      const acc = queue.shift();
-      if (!acc) return;
-      try {
-        const data = await api(`/api/status/${acc.id}`);
-        if (data.account) state.detailCache[acc.id] = data.account;
-      } catch (e) { /* 静默失败：预取只是锦上添花 */ }
-    }
-  });
-  await Promise.all(workers);
+// ---------------- 全局状态 ----------------
+
+const state = {
+  page: "overview",
+  summary: null,
+  tasks: [],
+  activities: [],
+  accounts: { items: [], total: 0, page: 1, page_size: 50, total_pages: 1, groups: [] },
+  accountQuery: { query: "", status: "", type: "", group: "", tag: "", sort: "last_activity", order: "desc" },
+  selected: new Set(),
+  detail: null,
+  detailCache: {},
+  detailTab: "overview",
+  history: [],
+  metric: "followers",
+  notifications: false,
+  prefetchEnabled: true,
+  collapsedGroups: new Set(),
+  lastRefresh: null,
+};
+
+// ---------------- 路由 ----------------
+
+const SUBTITLES = {
+  overview: "账号总览",
+  accounts: "全部账号",
+  todos: "统一待办",
+  automation: "自动化任务",
+  detail: "账号详情",
+};
+
+function go(page) {
+  state.page = page;
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${page}`));
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.page === page));
+  document.getElementById("subtitle").textContent = SUBTITLES[page] || "";
+  const scrollers = document.querySelectorAll(".main");
+  scrollers.forEach((s) => (s.scrollTop = 0));
+  if (page === "overview") loadOverview();
+  if (page === "accounts") loadAccountsPage();
+  if (page === "todos") loadTodos();
+  if (page === "automation") loadAutomation();
 }
 
-function togglePrefetch() {
-  state.prefetchEnabled = !state.prefetchEnabled;
-  if (!state.prefetchEnabled && prefetchTimer) {
-    clearTimeout(prefetchTimer);
-    prefetchTimer = null;
-  }
-  updatePrefetchBtn();
-  showToast(state.prefetchEnabled ? "已开启详情预取" : "已关闭详情预取");
-  if (state.prefetchEnabled) prefetchDetails().catch(() => {});
-}
+// ---------------- 账号总览 ----------------
 
-function updatePrefetchBtn() {
-  const btn = document.getElementById("prefetchBtn");
-  if (!btn) return;
-  btn.classList.toggle("active", state.prefetchEnabled);
-  btn.textContent = state.prefetchEnabled ? "预取·开" : "预取·关";
-}
-
-function issueKey(it) {
-  return `${it.repository_url || ""}#${it.number}`;
-}
-
-function checkNotifications(accounts) {
-  const current = Object.fromEntries(
-    accounts.map((a) => [
-      a.id,
-      {
-        reviewItems: (a.review_prs || []).map((it) => ({
-          key: issueKey(it),
-          repo: repoName(it.repository_url),
-        })),
-        issueItems: (a.assigned_issues || []).map((it) => ({
-          key: issueKey(it),
-          repo: repoName(it.repository_url),
-        })),
-      },
-    ])
-  );
-
-  if (state.notifications) {
-    for (const a of accounts) {
-      const prev = state.previousItems[a.id];
-      if (!prev) continue;
-      const cur = current[a.id];
-      const prevReview = new Set(prev.reviewItems.map((x) => x.key));
-      const prevIssues = new Set(prev.issueItems.map((x) => x.key));
-      const newReview = cur.reviewItems.filter((x) => !prevReview.has(x.key));
-      const newIssues = cur.issueItems.filter((x) => !prevIssues.has(x.key));
-      if (newReview.length || newIssues.length) {
-        const parts = [];
-        if (newReview.length) {
-          parts.push(`PR +${newReview.length}（${[...new Set(newReview.map((x) => x.repo))].join("、")}）`);
-        }
-        if (newIssues.length) {
-          parts.push(`Issue +${newIssues.length}（${[...new Set(newIssues.map((x) => x.repo))].join("、")}）`);
-        }
-        try {
-          new Notification(`GitHub · ${a.label}`, { body: parts.join("，") });
-        } catch (e) { /* 某些环境不允许构造通知，忽略 */ }
-      }
-    }
-  }
-  state.previousItems = current;
-}
-
-let loadingTimer = null;
-
-/** 延迟显示 loading：快速响应时不闪一下 */
-function showDetailLoading(id) {
-  clearTimeout(loadingTimer);
-  loadingTimer = setTimeout(() => {
-    if (state.detailLoadingId === id) {
-      document.getElementById("detailLoading").classList.remove("hidden");
-    }
-  }, 250);
-}
-
-function hideDetailLoading(id) {
-  clearTimeout(loadingTimer);
-  if (state.detailLoadingId !== id) return;
-  state.detailLoadingId = null;
-  document.getElementById("detailLoading").classList.add("hidden");
-}
-
-async function loadDetail(id) {
-  const reqId = ++state.detailRequestId;
-  const cached = state.detailCache[id];
-  // 有缓存先秒开旧数据，再后台刷新
-  if (cached && state.detail?.id !== id) {
-    state.detail = cached;
-    renderDetail();
-  }
-  state.detailLoadingId = id;
-  if (!cached) showDetailLoading(id);
+async function loadOverview() {
+  const cards = document.getElementById("summaryCards");
+  cards.innerHTML = `<div class="empty-tab">加载中…</div>`;
   try {
-    const data = await api(`/api/status/${id}`);
-    if (reqId !== state.detailRequestId) return; // 已有更新的请求，丢弃过期响应
-    state.detailCache[id] = data.account;
-    state.detail = data.account;
-    renderDetail();
-  } finally {
-    hideDetailLoading(id);
+    const [summary, taskData] = await Promise.all([
+      api("/api/dashboard/summary"),
+      api("/api/dashboard/tasks"),
+    ]);
+    state.summary = summary;
+    state.tasks = taskData.tasks;
+    renderSummary(summary);
+    renderOverviewTasks(taskData.tasks);
+    await loadOverviewActivities("all");
+    document.getElementById("todoBadge").textContent = taskData.total;
+    document.getElementById("todoBadge").classList.toggle("hidden", taskData.total === 0);
+    updateLastRefresh();
+  } catch (e) {
+    cards.innerHTML = `<div class="empty-tab">加载失败：${escapeHtml(e.message)} <button class="btn btn-sm" onclick="loadOverview()">重试</button></div>`;
   }
 }
 
-let refreshInFlight = false;
-let refreshQueued = false;
+function renderSummary(s) {
+  const cards = [
+    { num: s.total, label: "账号总数", cls: "is-accent" },
+    { num: s.healthy, label: "健康账号", cls: "is-success" },
+    { num: s.attention, label: "需要关注", cls: s.attention ? "is-danger" : "" },
+    { num: s.credential_risk, label: "凭据风险", cls: s.credential_risk ? "is-danger" : "" },
+    { num: s.quota_low, label: "配额不足", cls: s.quota_low ? "is-warning" : "" },
+    { num: s.review_prs, label: "待 Review PR", cls: "" },
+    { num: s.issues, label: "待处理 Issue", cls: "" },
+  ];
+  document.getElementById("summaryCards").innerHTML = cards
+    .map((c) => `<div class="stat-card ${c.cls}"><span class="stat-num">${c.num}</span><span class="stat-label">${c.label}</span></div>`)
+    .join("");
+  document.getElementById("lastRefresh").textContent = s.last_sync_at
+    ? "最近同步 " + relTime(s.last_sync_at)
+    : "尚未同步";
+}
 
-async function refreshAll(selectFirstIfNone = false) {
-  // 若已有刷新在进行，标记「待刷新」：当前刷新结束后会再跑一次，
-  // 确保拿到本次增删改之后的最新数据（否则要等下一个定时周期）。
-  if (refreshInFlight) {
-    refreshQueued = true;
+function updateLastRefresh() {
+  const el = document.getElementById("lastRefresh");
+  if (state.summary?.last_sync_at) el.textContent = "最近同步 " + relTime(state.summary.last_sync_at);
+}
+
+function renderOverviewTasks(tasks) {
+  const box = document.getElementById("overviewTasks");
+  const top = tasks.slice(0, 8);
+  if (!top.length) {
+    box.innerHTML = `<div class="empty-tab">当前没有需要处理的事项 ✓</div>`;
     return;
   }
-  refreshInFlight = true;
+  box.innerHTML = `<div class="task-list">${top.map(taskHtml).join("")}</div>`;
+}
+
+function taskHtml(t) {
+  const icon = {
+    credential: "🔑", quota: "📊", review_pr: "👀", my_pr: "📤",
+    issue: "📋", sync_failed: "⚠", sync_stale: "🕘",
+  }[t.type] || "•";
+  return `
+    <div class="task" data-priority="${t.priority}">
+      <div class="task-icon">${icon}</div>
+      <div class="task-body">
+        <div class="task-title">${escapeHtml(t.title)}</div>
+        <div class="task-meta">
+          <span class="tag">${escapeHtml(t.type_label || t.type)}</span>
+          <span class="tag">${escapeHtml(t.account_label)}</span>
+          <span>${escapeHtml(t.detail)}</span>
+          ${t.time ? `<span>${relTime(t.time)}</span>` : ""}
+        </div>
+      </div>
+      <div class="task-actions">
+        <span class="prio prio-${t.priority}">${{ high: "高", medium: "中", low: "低" }[t.priority]}</span>
+        <button class="btn btn-sm" onclick="openAccountDetail(${t.account_id})">${escapeHtml(t.action)}</button>
+      </div>
+    </div>`;
+}
+
+async function loadOverviewActivities(type) {
+  const box = document.getElementById("overviewActivities");
   try {
-    do {
-      refreshQueued = false;
-      await loadAccounts();
-      // 账号被删除后 id 会重排，失效的选中要清空
-      if (state.selectedId && !state.accounts.some((a) => a.id === state.selectedId)) {
-        state.selectedId = null;
-        state.detail = null;
-        document.getElementById("detail").classList.add("hidden");
-        document.getElementById("emptyState").classList.remove("hidden");
-      }
-      if (state.selectedId) {
-        await loadDetail(state.selectedId);
-      } else if (selectFirstIfNone && state.accounts.length) {
-        selectAccount(state.accounts[0].id);
-      }
-      updateLastRefresh();
-    } while (refreshQueued);
+    const data = await api(`/api/dashboard/activities?type=${encodeURIComponent(type)}&limit=30`);
+    state.activities = data.activities;
+    box.innerHTML = state.activities.length
+      ? `<div class="activity-list">${state.activities.map(activityHtml).join("")}</div>`
+      : `<div class="empty-tab">最近没有动态</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty-tab">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function activityHtml(a) {
+  return `
+    <div class="activity">
+      ${a.actor_avatar ? `<img class="activity-actor" src="${escapeHtml(a.actor_avatar)}" alt="" onerror="handleImgError(this)">` : ""}
+      <div class="activity-body">
+        <div><strong>${escapeHtml(a.actor || a.account_label)}</strong> ${escapeHtml(a.type)}${a.action ? " · " + escapeHtml(a.action) : ""}</div>
+        <div class="task-meta"><span class="tag">${escapeHtml(a.account_label)}</span>${a.repo ? `<span class="tag">${escapeHtml(a.repo)}</span>` : ""}</div>
+      </div>
+      <span class="activity-time">${relTime(a.created_at)}</span>
+    </div>`;
+}
+
+// ---------------- 全部账号 ----------------
+
+function syncUrlFromState() {
+  const p = new URLSearchParams();
+  const q = state.accountQuery;
+  if (q.query) p.set("query", q.query);
+  if (q.status) p.set("status", q.status);
+  if (q.type) p.set("type", q.type);
+  if (q.group) p.set("group", q.group);
+  if (q.tag) p.set("tags", q.tag);
+  p.set("sort", q.sort);
+  p.set("order", q.order);
+  p.set("page", state.accounts.page);
+  p.set("pageSize", state.accounts.page_size);
+  return p.toString();
+}
+
+async function loadAccountsPage(pushUrl = true) {
+  const body = document.getElementById("accountTableBody");
+  const loading = document.getElementById("accountTableLoading");
+  const empty = document.getElementById("accountTableEmpty");
+  loading.classList.remove("hidden");
+  empty.classList.add("hidden");
+  body.innerHTML = "";
+  if (pushUrl) history.replaceState(null, "", `/?${syncUrlFromState()}`);
+  try {
+    const p = syncUrlFromState();
+    const data = await api(`/api/accounts?${p}`);
+    state.accounts = data;
+    state.selected.clear();
+    renderAccountTable(data.items);
+    document.getElementById("accountsDesc").textContent =
+      `共 ${data.total} 个账号${state.accountQuery.query ? `，匹配 “${state.accountQuery.query}”` : ""}`;
+    document.getElementById("pagerInfo").textContent =
+      `第 ${data.page} 页 / 共 ${data.total_pages} 页（共 ${data.total} 个账号，每页 ${data.page_size} 条）`;
+    document.getElementById("prevPage").disabled = data.page <= 1;
+    document.getElementById("nextPage").disabled = data.page >= data.total_pages;
+    renderGroupFilter(data.groups);
+    renderTagFilter(data.tags || []);
+    loading.classList.add("hidden");
+    if (!data.items.length) empty.classList.remove("hidden");
+    updateBatchBar();
+  } catch (e) {
+    loading.classList.add("hidden");
+    body.innerHTML = `<tr><td colspan="10"><div class="empty-tab">加载失败：${escapeHtml(e.message)} <button class="btn btn-sm" onclick="loadAccountsPage()">重试</button></div></td></tr>`;
+  }
+}
+
+function renderAccountTable(items) {
+  const body = document.getElementById("accountTableBody");
+  body.innerHTML = items.map((a) => {
+    const pct = a.quota_limit ? Math.round((a.remaining / a.quota_limit) * 100) : 0;
+    const low = pct < 10 ? "is-low" : pct < 30 ? "is-mid" : "";
+    return `
+    <tr data-id="${a.id}" class="${state.selected.has(a.id) ? "is-selected" : ""} ${a.status === "invalid" || a.status === "error" ? "row-invalid" : ""}">
+      <td class="col-check"><input type="checkbox" data-check="${a.id}" ${state.selected.has(a.id) ? "checked" : ""}></td>
+      <td>
+        <div class="cell-user">
+          <img src="${a.avatar_url || ""}" alt="" onerror="handleImgError(this)">
+          <div>
+            <div class="cell-name">${escapeHtml(a.username)}</div>
+            <div class="cell-sub">${escapeHtml(a.label || "")}${a.alias ? " · " + escapeHtml(a.alias) : ""}</div>
+          </div>
+        </div>
+      </td>
+      <td>
+        <span class="tag">${{ personal: "个人", bot: "Bot", org: "组织" }[a.type] || "个人"}</span>
+        ${a.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}
+      </td>
+      <td>
+        <span class="status-badge ${a.status}">${statusText(a.status)}</span>
+        ${a.error ? `<div class="cell-sub">${escapeHtml(a.error)}</div>` : ""}
+      </td>
+      <td>
+        <div class="progress ${low}"><span style="width:${pct}%"></span></div>
+        <span class="cell-sub">${a.remaining}/${a.quota_limit || "?"}</span>
+      </td>
+      <td>${a.review_prs}</td>
+      <td>${a.assigned_issues}</td>
+      <td>${a.last_sync_at ? relTime(a.last_sync_at) : "—"}</td>
+      <td>${a.sync_enabled === false ? '<span class="tag">已暂停</span>' : '<span class="tag">已启用</span>'}</td>
+      <td class="col-op">
+        <button class="btn btn-sm" onclick="openAccountDetail(${a.id})">详情</button>
+        <button class="btn btn-sm" onclick="syncAccount(${a.id})">同步</button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  body.querySelectorAll("tr").forEach((tr) => {
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest("input,button")) return;
+      openAccountDetail(Number(tr.dataset.id));
+    });
+  });
+  body.querySelectorAll("[data-check]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const id = Number(cb.dataset.check);
+      if (cb.checked) state.selected.add(id);
+      else state.selected.delete(id);
+      updateBatchBar();
+    });
+  });
+}
+
+function renderGroupFilter(groups) {
+  const sel = document.getElementById("filterGroup");
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">全部分组</option>` +
+    groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
+  sel.value = cur;
+}
+
+function renderTagFilter(tags) {
+  const sel = document.getElementById("filterTag");
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">全部标签</option>` +
+    tags.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
+  sel.value = cur;
+}
+
+function updateBatchBar() {
+  const bar = document.getElementById("batchBar");
+  const n = state.selected.size;
+  bar.classList.toggle("hidden", n === 0);
+  document.getElementById("selectedCount").textContent = `已选 ${n} 个`;
+}
+
+async function syncAccount(id) {
+  try {
+    await api(`/api/accounts/${id}/sync`, { method: "POST" });
+    showToast("已同步");
+    await loadAccountsPage(false);
+    if (state.page === "detail" && state.detail && state.detail.id === id) await openAccountDetail(id);
   } catch (e) {
     showToast(e.message);
-  } finally {
-    refreshInFlight = false;
   }
 }
 
-// ---------------- 渲染：账号侧栏 ----------------
-
-function accountCardHtml(a) {
-  const user = a.user || {};
-  const avatar = user.avatar_url
-    ? `<img class="account-avatar" src="${escapeHtml(user.avatar_url)}" alt="" onerror="handleImgError(this)">`
-    : `<div class="account-avatar account-avatar-placeholder">${escapeHtml((a.label || "?")[0])}</div>`;
-  const counts = a.status === "active"
-    ? `<span>${a.review_prs_count ?? 0} PR</span><span>·</span><span>${a.assigned_issues_count ?? 0} Issue</span>`
-    : "";
-  const err = a.error ? `<div class="account-user" style="color:var(--red)">${escapeHtml(a.error)}</div>` : "";
-  return `
-    <div class="account-card ${a.id === state.selectedId ? "selected" : ""} ${a.id === state.highlightId ? "highlighted" : ""} ${a.status === "invalid" || a.status === "error" ? "invalid" : ""}"
-         data-id="${a.id}">
-      ${avatar}
-      <div class="account-info">
-        <div class="account-name">${escapeHtml(a.label)}</div>
-        <div class="account-user">${escapeHtml(user.login || a.username || "")}</div>
-        <div class="account-status">
-          <span class="dot ${escapeHtml(a.status)}"></span>
-          <span>${statusText(a.status)}</span>
-          ${counts}
-        </div>
-        ${err}
-      </div>
-      <button class="account-del" data-del="${a.id}" title="删除账号">×</button>
-    </div>`;
+async function batchRefresh() {
+  if (!state.selected.size) return;
+  try {
+    await api("/api/accounts/batch-refresh", {
+      method: "POST",
+      body: JSON.stringify({ ids: [...state.selected] }),
+    });
+    showToast(`已刷新 ${state.selected.size} 个账号`);
+    await loadAccountsPage(false);
+  } catch (e) {
+    showToast(e.message);
+  }
 }
 
-function renderAccountList() {
-  const list = document.getElementById("accountList");
-  const query = state.searchQuery.trim().toLowerCase();
-
-  const accounts = state.accounts.filter((a) => {
-    if (!query) return true;
-    const user = a.user || {};
-    return (
-      (a.label || "").toLowerCase().includes(query) ||
-      (a.username || "").toLowerCase().includes(query) ||
-      (user.login || "").toLowerCase().includes(query)
-    );
-  });
-
-  document.getElementById("accountCount").textContent = query
-    ? `${accounts.length}/${state.accounts.length}`
-    : state.accounts.length;
-  document.getElementById("clearSearch").classList.toggle("hidden", !query);
-
-  if (!state.accounts.length) {
-    list.innerHTML = `<div class="empty-tab">暂无账号</div>`;
-    return;
+async function batchExport() {
+  if (!state.selected.size) return;
+  try {
+    const data = await api(`/api/accounts?pageSize=200&query=&sort=username&order=asc`);
+    const ids = new Set(state.selected);
+    const rows = data.items.filter((a) => ids.has(a.id));
+    const payload = {
+      exported_at: new Date().toISOString(),
+      note: "账号信息备份（不含凭据 / Token）",
+      accounts: rows.map((a) => ({
+        username: a.username, label: a.label, alias: a.alias, type: a.type,
+        group: a.group, tags: a.tags, note: a.note, status: a.status,
+      })),
+    };
+    downloadJson(payload, `github-accounts-${rows.length}.json`);
+    showToast(`已导出 ${rows.length} 个账号信息（不含凭据）`);
+  } catch (e) {
+    showToast(e.message);
   }
-  if (!accounts.length) {
-    list.innerHTML = `<div class="empty-tab">没有匹配的账号</div>`;
-    return;
-  }
+}
 
-  if (state.highlightId == null && accounts.length) {
-    state.highlightId = state.selectedId ?? accounts[0].id;
-  }
+function downloadJson(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
-  // 按分组聚合（未分组放最后）
-  const groups = new Map();
-  for (const a of accounts) {
-    const g = (a.group || "").trim();
-    if (!groups.has(g)) groups.set(g, []);
-    groups.get(g).push(a);
-  }
-  const groupNames = [...groups.keys()].sort((x, y) => {
-    if (x === "" && y !== "") return 1;
-    if (y === "" && x !== "") return -1;
-    return x.localeCompare(y);
-  });
+// ---------------- 统一待办 ----------------
 
-  let html = "";
-  groupNames.forEach((g, gi) => {
-    const items = groups.get(g);
-    if (g) {
-      const collapsed = state.collapsedGroups.has(g);
-      html += `<div class="group-header" data-group-toggle="${gi}" title="点击折叠 / 展开">
-          <span class="group-caret" data-caret="${gi}">${collapsed ? "▸" : "▾"}</span>
-          <span>${escapeHtml(g)}</span>
-          <span class="count-badge">${items.length}</span>
-        </div>
-        <div class="group-body" data-group-body="${gi}" style="display:${collapsed ? "none" : ""}">`;
+async function loadTodos() {
+  const box = document.getElementById("todoList");
+  box.innerHTML = `<div class="empty-tab">加载中…</div>`;
+  try {
+    const params = new URLSearchParams();
+    const p = document.getElementById("todoPriority").value;
+    const t = document.getElementById("todoType").value;
+    const acc = document.getElementById("todoAccount").value;
+    if (p) params.set("priority", p);
+    if (t) params.set("type", t);
+    if (acc) params.set("accountId", acc);
+    let all = state.tasks;
+    if (params.toString()) {
+      const d = await api(`/api/dashboard/tasks?${params}`);
+      all = d.tasks;
     }
-    html += items.map(accountCardHtml).join("");
-    if (g) html += `</div>`;
-  });
-  list.innerHTML = html;
-
-  list.querySelectorAll("[data-group-toggle]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const g = groupNames[Number(el.dataset.groupToggle)];
-      if (state.collapsedGroups.has(g)) state.collapsedGroups.delete(g);
-      else state.collapsedGroups.add(g);
-      renderAccountList();
-    });
-  });
-
-  list.querySelectorAll(".account-card").forEach((card) => {
-    card.addEventListener("click", (e) => {
-      if (e.target.closest("[data-del]")) return;
-      selectAccount(Number(card.dataset.id));
-    });
-  });
-  list.querySelectorAll("[data-del]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteAccount(Number(btn.dataset.del));
-    });
-  });
+    document.getElementById("todosDesc").textContent = `共 ${all.length} 条待办`;
+    box.innerHTML = all.length
+      ? `<div class="task-list">${all.map(taskHtml).join("")}</div>`
+      : `<div class="empty-tab">当前没有需要处理的事项 ✓</div>`;
+    renderAccountOptions();
+  } catch (e) {
+    box.innerHTML = `<div class="empty-tab">加载失败：${escapeHtml(e.message)}</div>`;
+  }
 }
 
-// ---------------- 渲染：详情 ----------------
+function renderAccountOptions() {
+  const sel = document.getElementById("todoAccount");
+  const cur = sel.value;
+  const accounts = state.accounts?.items || [];
+  sel.innerHTML = `<option value="">全部账号</option>` +
+    (state.accounts?.items || []).map((a) => `<option value="${a.id}">${escapeHtml(a.username)}</option>`).join("");
+  sel.value = cur;
+}
 
-function renderDetail() {
-  const d = state.detail;
-  if (!d) return;
+// ---------------- 自动化任务 ----------------
 
-  document.getElementById("emptyState").classList.add("hidden");
-  document.getElementById("detail").classList.remove("hidden");
+async function loadAutomation() {
+  try {
+    const [tasks, audit] = await Promise.all([
+      api("/api/tasks"),
+      api("/api/audit?limit=30"),
+    ]);
+    document.getElementById("automationSummary").innerHTML = `
+      <div class="stat-grid">
+        <div class="stat-card"><span class="stat-num">${tasks.config.concurrency}</span><span class="stat-label">并发上限</span></div>
+        <div class="stat-card"><span class="stat-num">${tasks.config.interval_seconds}s</span><span class="stat-label">同步间隔</span></div>
+        <div class="stat-card"><span class="stat-num">${tasks.states.length}</span><span class="stat-label">已跟踪账号</span></div>
+        <div class="stat-card"><span class="stat-num">${tasks.running ? "运行中" : "空闲"}</span><span class="stat-label">同步状态</span></div>
+      </div>`;
+    document.getElementById("auditList").innerHTML = audit.items.length
+      ? `<div class="item-list">${audit.items.map((a) => `
+          <div class="item">
+            <div class="item-body">
+              <div class="item-title" style="font-weight:500">${escapeHtml(a.action)}</div>
+              <div class="item-meta"><span class="tag">${escapeHtml(a.username || "-")}</span><span>${escapeHtml(a.detail || "")}</span></div>
+            </div>
+            <span class="item-time">${relTime(a.ts)}</span>
+          </div>`).join("")}</div>`
+      : `<div class="empty-tab">暂无审计记录</div>`;
+  } catch (e) {
+    document.getElementById("automationSummary").innerHTML = `<div class="empty-tab">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
 
-  // 头部
+// ---------------- 单账号详情 ----------------
+
+async function openAccountDetail(id) {
+  state.detailCache = state.detailCache || {};
+  go("detail");
+  document.getElementById("detailContent").innerHTML = `<div class="empty-tab">加载中…</div>`;
+  try {
+    let d = state.detailCache[id];
+    if (!d) {
+      const data = await api(`/api/status/${id}`);
+      d = data.account;
+      state.detailCache[id] = d;
+    }
+    state.detail = d;
+    renderDetailHead(d);
+    renderDetailTab(d);
+  } catch (e) {
+    document.getElementById("detailContent").innerHTML =
+      `<div class="empty-tab">加载失败：${escapeHtml(e.message)} <button class="btn btn-sm" onclick="openAccountDetail(${id})">重试</button></div>`;
+  }
+}
+
+function renderDetailHead(d) {
   const user = d.user || {};
-  document.getElementById("avatar").src = user.avatar_url || "";
+  const avatar = document.getElementById("detailAvatar");
+  avatar.src = user.avatar_url || "";
+  avatar.onerror = function () { handleImgError(this); };
   document.getElementById("detailName").textContent = d.label || d.username;
   const rate = d.rate_limit?.resources?.core;
-  const rateText = rate ? ` · API 剩余 ${rate.remaining}/${rate.limit}` : "";
   document.getElementById("detailMeta").textContent =
-    `${user.login || d.username || ""}${user.name ? "（" + user.name + "）" : ""}${rateText}`;
-  const badge = document.getElementById("statusBadge");
-  badge.className = `status-badge ${escapeHtml(d.status)}`;
-  badge.innerHTML = `<span class="dot ${escapeHtml(d.status)}"></span>${statusText(d.status)}`;
-
-  // 部分数据获取失败的提示
-  const warnBox = document.getElementById("detailWarnings");
-  if (warnBox) {
-    warnBox.innerHTML = (d.warnings || []).length
-      ? `<div class="warn-bar">部分数据获取失败：${d.warnings.map(escapeHtml).join("、")}</div>`
-      : "";
-  }
-
-  // 统计
-  document.getElementById("statReview").textContent = d.review_prs.length;
-  document.getElementById("statMyPr").textContent = d.my_prs.length;
-  document.getElementById("statIssue").textContent = d.assigned_issues.length;
-  document.getElementById("statEvents").textContent = d.events.length;
-
-  renderTab();
+    `${user.login || d.username || ""}${user.name ? "（" + user.name + "）" : ""}${rate ? ` · API 剩余 ${rate.remaining}/${rate.limit}` : ""}`;
+  const badge = document.getElementById("detailStatus");
+  badge.className = `status-badge ${d.status}`;
+  badge.innerHTML = `<span>${statusText(d.status)}</span>`;
+  const warn = (d.warnings || []).length
+    ? `<div class="test-result fail" style="color:var(--warning)">部分数据获取失败：${d.warnings.map(escapeHtml).join("、")}</div>`
+    : "";
+  document.getElementById("detailWarnings").innerHTML = warn;
 }
 
-function renderTab() {
-  document.querySelectorAll("#tabs .tab").forEach((t) => {
-    t.classList.toggle("active", t.dataset.tab === state.activeTab);
-  });
-  const content = document.getElementById("tabContent");
-  const d = state.detail;
-  if (!d) return;
-
-  switch (state.activeTab) {
-    case "overview":
-      content.innerHTML = overviewHtml(d);
-      bindMetricPills();
-      bindSnapshotBtn();
-      bindExportHistoryBtn();
-      loadHistory(d.id);
-      break;
-    case "compare":
-      content.innerHTML = compareHtml();
-      bindCompareRows();
-      bindLoadStarsBtn();
-      break;
-    case "review":
-      content.innerHTML = prList(d.review_prs, "待我 Review");
-      bindListFilter();
-      break;
-    case "mypr":
-      content.innerHTML = prList(d.my_prs, null);
-      bindListFilter();
-      break;
-    case "issues":
-      content.innerHTML = issueList(d.assigned_issues);
-      bindListFilter();
-      break;
-    case "events":
-      content.innerHTML = eventList(d.events);
-      break;
-    case "repos":
-      content.innerHTML = repoList(d.repos);
-      break;
-  }
-}
-
-const METRICS = [
-  { key: "followers", label: "粉丝" },
-  { key: "following", label: "关注" },
-  { key: "total_stars", label: "Star" },
-  { key: "review_prs", label: "PR" },
-  { key: "assigned_issues", label: "Issue" },
-];
-
-function overviewHtml(d) {
-  const stats = `
-    <div class="stats">
-      <div class="stat-card"><span class="stat-num">${d.followers_count}</span><span class="stat-label">粉丝</span></div>
-      <div class="stat-card"><span class="stat-num">${d.following_count}</span><span class="stat-label">关注</span></div>
-      <div class="stat-card"><span class="stat-num">${d.total_stars}</span><span class="stat-label">总 Star</span></div>
-      <div class="stat-card"><span class="stat-num">${d.public_repos}</span><span class="stat-label">公开仓库</span></div>
-    </div>`;
-
-  const topRepos = d.top_repos || [];
-  const maxStars = Math.max(1, ...topRepos.map((r) => r.stars));
-  const bars = topRepos.length
-    ? `<div class="bar-chart">${topRepos.map((r) => `
-        <div class="bar-row">
-          <a class="bar-label" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</a>
-          <div class="bar-track"><div class="bar-fill" style="width:${((r.stars / maxStars) * 100).toFixed(1)}%"></div></div>
-          <span class="bar-value">★ ${r.stars}</span>
-        </div>`).join("")}</div>`
-    : `<div class="empty-tab">没有 Star 数据</div>`;
-
-  const colors = ["var(--text-muted)", "var(--green)", "var(--accent)", "var(--purple)", "var(--yellow)"];
-  const dist = d.star_distribution || [];
-  const distTotal = dist.reduce((sum, x) => sum + x.count, 0);
-  const distSegs = dist.map((x, i) =>
-    `<div class="dist-seg" style="width:${distTotal ? ((x.count / distTotal) * 100).toFixed(2) : 0}%;background:${colors[i % colors.length]}" title="${escapeHtml(x.label)}: ${x.count}"></div>`
-  ).join("");
-  const distLegend = dist.map((x, i) =>
-    `<span><span class="dist-dot" style="background:${colors[i % colors.length]}"></span>${escapeHtml(x.label)} · ${x.count}</span>`
-  ).join("");
-  const distHtml = `<div class="dist-bar">${distSegs}</div><div class="dist-legend">${distLegend}</div>`;
-
-  const avatarGrid = (list) => (list || []).length
-    ? `<div class="avatar-grid">${list.map((u) => `
-        <a class="avatar-chip" href="${safeUrl(u.html_url)}" target="_blank" rel="noopener" title="${escapeHtml(u.login)}">
-          <img src="${escapeHtml(u.avatar_url)}" alt="" loading="lazy">${escapeHtml(u.login)}
-        </a>`).join("")}</div>`
-    : `<div class="empty-tab">暂无数据</div>`;
-
-  return `
-    ${stats}
-    <div class="panel">
-      <h3>趋势 <span class="muted">历史快照</span></h3>
-      <div class="metric-pills" id="metricPills">
-        ${METRICS.map((m) => `<button class="pill ${state.metric === m.key ? "active" : ""}" data-metric="${m.key}">${m.label}</button>`).join("")}
-      </div>
-      <div id="trendContent"><div class="empty-tab">加载中...</div></div>
-      <div class="trend-footer">
-        <button id="snapshotBtn" class="btn">记录当前快照</button>
-        <button id="exportHistoryBtn" class="btn">导出 CSV</button>
-        <span id="trendStats"></span>
-      </div>
-    </div>
-    <div class="panel">
-      <h3>仓库 Star 排行 <span class="muted">Top ${topRepos.length}</span></h3>
-      ${bars}
-    </div>
-    <div class="panel">
-      <h3>Star 分布 <span class="muted">共 ${distTotal} 个仓库</span></h3>
-      ${distHtml}
-    </div>
-    <div class="panel">
-      <h3>粉丝 <span class="muted">前 ${(d.follower_list || []).length} 个</span></h3>
-      ${avatarGrid(d.follower_list)}
-    </div>
-    <div class="panel">
-      <h3>关注 <span class="muted">前 ${(d.following_list || []).length} 个</span></h3>
-      ${avatarGrid(d.following_list)}
-    </div>`;
+function renderDetailTab(d) {
+  document.querySelectorAll("#detailTabs .tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.tab === state.detailTab)
+  );
+  const box = document.getElementById("detailContent");
+  if (state.detailTab === "overview") box.innerHTML = overviewHtml(d);
+  if (state.detailTab === "compare") box.innerHTML = compareHtml(d);
+  if (state.detailTab === "review") box.innerHTML = prList(d.review_prs, "待我 Review");
+  if (state.detailTab === "mypr") box.innerHTML = prList(d.my_prs, null);
+  if (state.detailTab === "issues") box.innerHTML = issueList(d.assigned_issues);
+  if (state.detailTab === "events") box.innerHTML = eventList(d.events);
+  if (state.detailTab === "repos") box.innerHTML = repoList(d.repos);
 }
 
 const COMPARE_COLS = [
@@ -566,276 +556,66 @@ const COMPARE_COLS = [
   { key: "total_stars", label: "总 Star" },
 ];
 
-function compareHtml() {
-  const accounts = state.accounts;
-  if (!accounts.length) return `<div class="empty-tab">暂无账号</div>`;
-
-  const rows = accounts.map((a) => {
-    const star = state.detailCache[a.id] ? state.detailCache[a.id].total_stars : null;
-    const cells = COMPARE_COLS.map((c) => {
-      const v = c.key === "total_stars"
-        ? (star === null ? `<span class="muted">未加载</span>` : star)
-        : (a[c.key] ?? 0);
-      return `<td>${v}</td>`;
-    }).join("");
-    return `<tr>
-      <td><a href="#" data-account="${a.id}">${escapeHtml(a.label)}</a></td>
-      <td><span class="dot ${escapeHtml(a.status)}"></span> ${statusText(a.status)}</td>
-      ${cells}
-    </tr>`;
-  }).join("");
-
-  const maxFollowers = Math.max(1, ...accounts.map((a) => a.followers_count || 0));
-  const bars = accounts.map((a) => `
-    <div class="bar-row">
-      <span class="bar-label">${escapeHtml(a.label)}</span>
-      <div class="bar-track"><div class="bar-fill" style="width:${(((a.followers_count || 0) / maxFollowers) * 100).toFixed(1)}%"></div></div>
-      <span class="bar-value">${a.followers_count || 0}</span>
-    </div>`).join("");
-
+function overviewHtml(d) {
+  const cards = `
+    <div class="stat-grid">
+      <div class="stat-card"><span class="stat-num">${d.followers_count ?? 0}</span><span class="stat-label">粉丝</span></div>
+      <div class="stat-card"><span class="stat-num">${d.following_count ?? 0}</span><span class="stat-label">关注</span></div>
+      <div class="stat-card"><span class="stat-num">${d.total_stars ?? 0}</span><span class="stat-label">总 Star</span></div>
+      <div class="stat-card"><span class="stat-num">${d.public_repos ?? 0}</span><span class="stat-label">公开仓库</span></div>
+    </div>`;
+  const top = d.top_repos || [];
+  const max = Math.max(1, ...top.map((r) => r.stars));
+  const bars = top.length
+    ? `<div class="item-list">${top.map((r) => `
+        <div class="item">
+          <div class="item-body">
+            <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
+          </div>
+          <div class="progress" style="width:120px"><span style="width:${((r.stars / max) * 100).toFixed(1)}%"></span></div>
+          <span class="item-time">★ ${r.stars}</span>
+        </div>`).join("")}</div>`
+    : `<div class="empty-tab">没有 Star 数据</div>`;
   return `
     <div class="panel">
-      <h3>账号对比 <span class="muted">${accounts.length} 个账号</span></h3>
-      <div class="table-wrap">
-        <table class="compare-table">
-          <thead><tr><th>账号</th><th>状态</th>${COMPARE_COLS.map((c) => `<th>${c.label}</th>`).join("")}</tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+      <div class="panel-head"><h3>数据概览</h3><button class="btn btn-sm" onclick="loadHistoryDetail()">刷新趋势</button></div>
+      ${cards}
+      <h3 style="margin:14px 0 10px;font-size:14px">仓库 Star 排行</h3>
+      ${bars}
+      <div id="detailTrend"></div>
     </div>
     <div class="panel">
-      <h3>粉丝数对比</h3>
-      <div class="bar-chart">${bars}</div>
-    </div>
-    <div class="panel">
-      <h3>Star 对比 <span class="muted">需加载完整数据</span></h3>
-      <div id="compareStars"><div class="empty-tab">点击下方按钮加载各账号的仓库 Star 数据</div></div>
-      <div class="trend-footer"><button id="loadStarsBtn" class="btn">加载 Star 数据</button></div>
+      <div class="panel-head"><h3>历史趋势</h3></div>
+      <div id="trendBox"><div class="empty-tab">点击上方「刷新趋势」加载</div></div>
     </div>`;
 }
 
-function bindCompareRows() {
-  document.querySelectorAll("#tabContent [data-account]").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      e.preventDefault();
-      selectAccount(Number(el.dataset.account));
-    });
-  });
-}
-
-async function loadAllStars() {
-  const btn = document.getElementById("loadStarsBtn");
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "加载中…";
-  }
-  for (const a of state.accounts) {
-    try {
-      const data = await api(`/api/status/${a.id}`);
-      state.detailCache[a.id] = data.account;
-    } catch (e) { /* 单个失败不影响其他 */ }
-  }
-  renderTab();
-}
-
-function bindLoadStarsBtn() {
-  const btn = document.getElementById("loadStarsBtn");
-  if (btn) btn.addEventListener("click", loadAllStars);
-}
-
-function lineChart(points, label) {
-  if (!points.length) return `<div class="empty-tab">暂无历史数据</div>`;
-  const w = 640, h = 180, padL = 44, padR = 14, padT = 14, padB = 26;
-  const xs = points.map((p) => p.t);
-  const ys = points.map((p) => p.v);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const spanX = maxX - minX || 1;
-  const spanY = maxY - minY || Math.max(1, maxY * 0.1);
-  const px = (t) => padL + ((t - minX) / spanX) * (w - padL - padR);
-  const py = (v) => padT + (1 - (v - minY) / spanY) * (h - padT - padB);
-
-  const path = points.map((p, i) => `${i ? "L" : "M"}${px(p.t).toFixed(1)},${py(p.v).toFixed(1)}`).join(" ");
-  const area = `${path} L${px(maxX).toFixed(1)},${(h - padB).toFixed(1)} L${px(minX).toFixed(1)},${(h - padB).toFixed(1)} Z`;
-
-  let grid = "";
-  const ticks = 4;
-  for (let i = 0; i <= ticks; i++) {
-    const v = minY + (spanY * i) / ticks;
-    const y = py(v).toFixed(1);
-    grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke-width="1" style="stroke:var(--border-light)"/>`;
-    grid += `<text x="${padL - 6}" y="${+y + 4}" text-anchor="end" font-size="10" style="fill:var(--text-muted)">${Math.round(v)}</text>`;
-  }
-
-  const fmt = (t) => new Date(t).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
-  const xLabels =
-    `<text x="${padL}" y="${h - 8}" font-size="10" style="fill:var(--text-muted)">${fmt(minX)}</text>` +
-    `<text x="${w - padR}" y="${h - 8}" text-anchor="end" font-size="10" style="fill:var(--text-muted)">${fmt(maxX)}</text>`;
-
-  return `<svg viewBox="0 0 ${w} ${h}" class="trend-chart" role="img" aria-label="${escapeHtml(label)}趋势">
-    ${grid}
-    <path d="${area}" stroke="none" style="fill:var(--accent-soft)"/>
-    <path d="${path}" fill="none" stroke-width="2" stroke-linejoin="round" style="stroke:var(--accent)"/>
-    ${xLabels}
-  </svg>`;
-}
-
-function renderTrend() {
-  const box = document.getElementById("trendContent");
-  if (!box) return;
-  const conf = METRICS.find((m) => m.key === state.metric) || METRICS[0];
-  const history = state.history || [];
-  const stats = document.getElementById("trendStats");
-  if (!history.length) {
-    box.innerHTML = `<div class="empty-tab">暂无历史数据，运行一段时间后自动生成</div>`;
-    if (stats) stats.textContent = "";
-    return;
-  }
-  const points = history
-    .map((h) => ({ t: new Date(h.created_at).getTime(), v: Number(h[conf.key]) || 0 }))
-    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v));
-  if (!points.length) {
-    box.innerHTML = `<div class="empty-tab">暂无有效历史数据</div>`;
-    if (stats) stats.textContent = "";
-    return;
-  }
-  const first = history[0][conf.key];
-  const last = history[history.length - 1][conf.key];
-  const diff = last - first;
-  const pct = first ? ((diff / first) * 100).toFixed(1) : null;
-  const trend = diff > 0
-    ? `↗ +${diff}${pct !== null ? ` (${pct}%)` : ""}`
-    : diff < 0
-    ? `↘ ${diff}${pct !== null ? ` (${pct}%)` : ""}`
-    : "→ 无变化";
-  box.innerHTML = lineChart(points, conf.label);
-  if (stats) stats.textContent = `${conf.label}：首条 ${first} → 最新 ${last}（${trend}）`;
-}
-
-async function loadHistory(accountId) {
-  const box = document.getElementById("trendContent");
-  if (!box) return;
-  const reqId = ++state.historyRequestId;
-  try {
-    const data = await api(`/api/history/${accountId}?limit=300`);
-    if (reqId !== state.historyRequestId || accountId !== state.selectedId) return;
-    state.history = data.history || [];
-    renderTrend();
-  } catch (e) {
-    if (reqId !== state.historyRequestId) return;
-    state.history = [];
-    box.innerHTML = `<div class="empty-tab">无法加载历史数据</div>`;
-  }
-}
-
-function bindMetricPills() {
-  document.querySelectorAll("#metricPills .pill").forEach((p) => {
-    p.addEventListener("click", () => {
-      state.metric = p.dataset.metric;
-      document.querySelectorAll("#metricPills .pill").forEach((x) => x.classList.toggle("active", x === p));
-      renderTrend();
-    });
-  });
-}
-
-function bindSnapshotBtn() {
-  const btn = document.getElementById("snapshotBtn");
-  if (btn) btn.addEventListener("click", takeSnapshot);
-}
-
-async function takeSnapshot() {
-  if (!state.detail) return;
-  try {
-    await api(`/api/snapshot/${state.detail.id}`, { method: "POST" });
-    showToast("已记录快照");
-    await loadHistory(state.detail.id);
-  } catch (e) {
-    showToast(e.message);
-  }
-}
-
-function bindExportHistoryBtn() {
-  const btn = document.getElementById("exportHistoryBtn");
-  if (btn) btn.addEventListener("click", exportHistory);
-}
-
-async function exportHistory() {
-  if (!state.detail) return;
-  try {
-    const data = await api(`/api/history/${state.detail.id}?limit=1000`);
-    const history = data.history || [];
-    if (!history.length) {
-      showToast("暂无历史数据");
-      return;
-    }
-    const headers = ["时间", "粉丝", "关注", "总Star", "公开仓库", "待处理PR", "我的PR", "分配Issue", "动态"];
-    const rows = history.map((h) => [
-      h.created_at, h.followers, h.following, h.total_stars, h.public_repos,
-      h.review_prs, h.my_prs, h.assigned_issues, h.events,
-    ]);
-    // \uFEFF 是 BOM，保证 Excel 正确识别 UTF-8
-    const csv = "\uFEFF" + [headers, ...rows].map((r) => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `github-history-${state.detail.username || state.detail.id}-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast("历史已导出");
-  } catch (e) {
-    showToast(e.message);
-  }
-}
-
-function listFilterBar() {
-  return `<div class="filter-bar">
-    <input id="listFilter" type="text" placeholder="过滤：仓库 / 标签 / 关键字" autocomplete="off">
-  </div>`;
-}
-
-function matchesListFilter(it, q) {
-  if (!q) return true;
-  return (
-    (it.title || "").toLowerCase().includes(q) ||
-    repoName(it.repository_url).toLowerCase().includes(q) ||
-    (it.labels || []).some((l) => (l.name || "").toLowerCase().includes(q))
-  );
-}
-
-function bindListFilter() {
-  const input = document.getElementById("listFilter");
-  if (!input) return;
-  input.addEventListener("input", () => {
-    const q = input.value;
-    renderTab(); // 重新渲染后按关键字过滤
-    const el = document.getElementById("listFilter");
-    if (el) {
-      el.value = q;
-      el.focus();
-      el.setSelectionRange(q.length, q.length);
-    }
-  });
+function compareHtml(d) {
+  const s = state.accounts?.items || [];
+  const rows = s.map((a) => `
+    <tr>
+      <td>${escapeHtml(a.username)}</td>
+      <td>${a.followers}</td>
+      <td>${a.following}</td>
+      <td>${a.public_repos}</td>
+      <td>${a.review_prs}</td>
+      <td>${a.assigned_issues}</td>
+      <td>${a.total_stars}</td>
+    </tr>`).join("");
+  return `<div class="panel"><div class="panel-head"><h3>与全部账号对比</h3></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>账号</th>${COMPARE_COLS.map((c) => `<th>${c.label}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 
 function prList(items, note) {
-  const filter = listFilterBar();
-  if (!items.length) return `${filter}<div class="empty-tab">${note ? "没有待处理的 PR" : "没有发起中的 PR"}</div>`;
-  const q = (document.getElementById("listFilter")?.value || "").trim().toLowerCase();
-  const shown = items.filter((it) => matchesListFilter(it, q));
-  if (q && !shown.length) return `${filter}<div class="empty-tab">没有匹配的 PR</div>`;
-  return `${filter}<div class="item-list">${shown.map((it) => `
+  if (!items.length) return `<div class="empty-tab">${note ? "没有待处理的 PR" : "没有发起中的 PR"}</div>`;
+  return `<div class="item-list">${items.map((it) => `
     <div class="item">
-      <div class="item-icon pr">PR</div>
       <div class="item-body">
         <a class="item-title" href="${safeUrl(it.html_url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
         <div class="item-meta">
-          <span class="repo-tag">${escapeHtml(repoName(it.repository_url))}</span>
-          <span>#${it.number}</span>
-          <span>@${escapeHtml(it.user?.login || "")}</span>
-          ${it.labels?.slice(0, 3).map((l) => `<span class="label-tag">${escapeHtml(l.name)}</span>`).join("")}
+          <span class="tag">${escapeHtml(repoName(it.repository_url))}</span>
+          <span>#${it.number}</span><span>@${escapeHtml(it.user?.login || "")}</span>
+          ${it.labels?.slice(0, 3).map((l) => `<span class="tag">${escapeHtml(l.name)}</span>`).join("")}
         </div>
       </div>
       <span class="item-time">${relTime(it.created_at)}</span>
@@ -843,21 +623,14 @@ function prList(items, note) {
 }
 
 function issueList(items) {
-  const filter = listFilterBar();
-  if (!items.length) return `${filter}<div class="empty-tab">没有分配给你的 Issue</div>`;
-  const q = (document.getElementById("listFilter")?.value || "").trim().toLowerCase();
-  const shown = items.filter((it) => matchesListFilter(it, q));
-  if (q && !shown.length) return `${filter}<div class="empty-tab">没有匹配的 Issue</div>`;
-  return `${filter}<div class="item-list">${shown.map((it) => `
+  if (!items.length) return `<div class="empty-tab">没有分配给你的 Issue</div>`;
+  return `<div class="item-list">${items.map((it) => `
     <div class="item">
-      <div class="item-icon issue">IS</div>
       <div class="item-body">
         <a class="item-title" href="${safeUrl(it.html_url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
         <div class="item-meta">
-          <span class="repo-tag">${escapeHtml(repoName(it.repository_url))}</span>
-          <span>#${it.number}</span>
-          <span>@${escapeHtml(it.user?.login || "")}</span>
-          ${it.labels?.slice(0, 3).map((l) => `<span class="label-tag">${escapeHtml(l.name)}</span>`).join("")}
+          <span class="tag">${escapeHtml(repoName(it.repository_url))}</span>
+          <span>#${it.number}</span><span>@${escapeHtml(it.user?.login || "")}</span>
         </div>
       </div>
       <span class="item-time">${relTime(it.created_at)}</span>
@@ -865,39 +638,25 @@ function issueList(items) {
 }
 
 const EVENT_TYPES = {
-  PushEvent: { text: "推送了提交", color: "var(--green)" },
-  PullRequestEvent: { text: "处理了 PR", color: "var(--accent)" },
-  IssuesEvent: { text: "处理了 Issue", color: "var(--yellow)" },
-  WatchEvent: { text: "Star 了仓库", color: "var(--yellow)" },
-  CreateEvent: { text: "创建了分支/标签", color: "var(--purple)" },
-  DeleteEvent: { text: "删除了分支/标签", color: "var(--red)" },
-  ReleaseEvent: { text: "发布了 Release", color: "var(--green)" },
-  ForkEvent: { text: "Fork 了仓库", color: "var(--text-secondary)" },
-  IssueCommentEvent: { text: "评论了 Issue", color: "var(--text-secondary)" },
-  CommitCommentEvent: { text: "评论了提交", color: "var(--text-secondary)" },
-  PullRequestReviewEvent: { text: "评审了 PR", color: "var(--accent)" },
-  PullRequestReviewCommentEvent: { text: "评论了 PR", color: "var(--accent)" },
-  MemberEvent: { text: "成员变更", color: "var(--text-secondary)" },
+  PushEvent: { text: "推送了提交" }, PullRequestEvent: { text: "处理了 PR" },
+  IssuesEvent: { text: "处理了 Issue" }, WatchEvent: { text: "Star 了仓库" },
+  CreateEvent: { text: "创建了分支/标签" }, DeleteEvent: { text: "删除了分支/标签" },
+  ReleaseEvent: { text: "发布了 Release" }, ForkEvent: { text: "Fork 了仓库" },
+  IssueCommentEvent: { text: "评论了 Issue" }, CommitCommentEvent: { text: "评论了提交" },
 };
 
 function eventList(events) {
-  if (!events.length) return `<div class="empty-tab">最近没有动态（received_events 仅包含公开可见事件）</div>`;
+  if (!events.length) return `<div class="empty-tab">最近没有动态</div>`;
   return `<div class="item-list">${events.map((ev) => {
-    const type = EVENT_TYPES[ev.type] || { text: ev.type, color: "var(--text-secondary)" };
+    const t = EVENT_TYPES[ev.type] || { text: ev.type };
     const actor = ev.actor || {};
     const repo = ev.repo || {};
-    const action = ev.payload?.action ? ` · ${escapeHtml(ev.payload.action)}` : "";
     return `
     <div class="item">
-      <img class="item-actor" src="${escapeHtml(actor.avatar_url || "")}" alt="">
+      ${actor.avatar_url ? `<img class="activity-actor" src="${escapeHtml(actor.avatar_url)}" alt="" onerror="handleImgError(this)">` : ""}
       <div class="item-body">
-        <div class="item-title" style="font-weight:500">
-          <span style="color:${type.color}">${escapeHtml(actor.login || "")}</span>
-          ${escapeHtml(type.text)}${action}
-        </div>
-        <div class="item-meta">
-          <span class="repo-tag">${escapeHtml(repo.name || "")}</span>
-        </div>
+        <div class="item-title" style="font-weight:500">${escapeHtml(actor.login || "")} ${escapeHtml(t.text)}${ev.payload?.action ? " · " + escapeHtml(ev.payload.action) : ""}</div>
+        <div class="item-meta"><span class="tag">${escapeHtml(repo.name || "")}</span></div>
       </div>
       <span class="item-time">${relTime(ev.created_at)}</span>
     </div>`;
@@ -908,191 +667,189 @@ function repoList(repos) {
   if (!repos.length) return `<div class="empty-tab">没有公开仓库</div>`;
   return `<div class="item-list">${repos.map((r) => `
     <div class="item">
-      <div class="item-icon" style="background:var(--accent-soft);color:var(--accent)">◇</div>
       <div class="item-body">
         <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
         <div class="item-meta">
-          <span>★ ${r.stargazers_count ?? 0}</span>
-          <span>⑂ ${r.forks_count ?? 0}</span>
+          <span>★ ${r.stargazers_count ?? 0}</span><span>⑂ ${r.forks_count ?? 0}</span>
           ${r.language ? `<span>${escapeHtml(r.language)}</span>` : ""}
-          ${r.private ? `<span class="label-tag">私有</span>` : ""}
         </div>
       </div>
       <span class="item-time">更新于 ${relTime(r.updated_at)}</span>
     </div>`).join("")}</div>`;
 }
 
-// ---------------- 交互 ----------------
-
-function selectAccount(id) {
-  state.selectedId = id;
-  state.highlightId = id;
-  renderAccountList();
-  loadDetail(id).catch((e) => showToast(e.message));
-}
-
-function clearSearch() {
-  document.getElementById("searchInput").value = "";
-  state.searchQuery = "";
-  renderAccountList();
-  document.getElementById("searchInput").focus();
-}
-
-/** 新增/更新账号后立即在侧栏反映（数据先留占位，刷新后补齐） */
-function upsertLocalAccount(acc) {
-  delete state.detailCache[acc.id]; // 账号可能改了 token，旧详情失效
-  const existing = state.accounts.find((a) => a.id === acc.id);
-  if (existing) {
-    Object.assign(existing, acc);
-  } else {
-    state.accounts.push({
-      ...acc,
-      status: "unknown",
-      user: null,
-      error: null,
-      group: acc.group || "",
-      review_prs_count: 0,
-      my_prs_count: 0,
-      assigned_issues_count: 0,
-    });
-  }
-  renderAccountList();
-}
-
-function removeLocalAccount(id) {
-  delete state.detailCache[id];
-  state.accounts = state.accounts.filter((a) => a.id !== id);
-  renderAccountList();
-}
-
-async function deleteAccount(id) {
-  const acc = state.accounts.find((a) => a.id === id);
-  if (!acc) return;
-  if (!confirm(`确定删除账号「${acc.label}」吗？`)) return;
+async function loadHistoryDetail() {
+  if (!state.detail) return;
   try {
-    await api(`/api/accounts/${id}`, { method: "DELETE" });
-    // 乐观移除：立刻从侧栏消失
-    removeLocalAccount(id);
-    if (state.selectedId === id) {
-      state.selectedId = null;
-      state.detail = null;
-      document.getElementById("detail").classList.add("hidden");
-      document.getElementById("emptyState").classList.remove("hidden");
-    }
-    showToast("已删除");
-    await refreshAll();
+    const data = await api(`/api/history/${state.detail.id}?limit=300`);
+    state.history = data.history || [];
+    renderTrendBox();
+  } catch (e) {
+    document.getElementById("trendBox").innerHTML = `<div class="empty-tab">加载失败</div>`;
+  }
+}
+
+function renderTrendBox() {
+  const box = document.getElementById("trendBox");
+  const history = state.history || [];
+  if (!history.length) {
+    box.innerHTML = `<div class="empty-tab">暂无历史数据，同步后自动生成</div>`;
+    return;
+  }
+  const metric = state.metric;
+  const points = history.map((h) => ({ t: new Date(h.created_at).getTime(), v: Number(h[metric]) || 0 }))
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v));
+  if (!points.length) {
+    box.innerHTML = `<div class="empty-tab">暂无有效数据</div>`;
+    return;
+  }
+  const w = 640, h = 170, padL = 44, padR = 14, padT = 14, padB = 26;
+  const xs = points.map((p) => p.t), ys = points.map((p) => p.v);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || Math.max(1, maxY * 0.1);
+  const px = (t) => padL + ((t - minX) / spanX) * (w - padL - padR);
+  const py = (v) => padT + (1 - (v - minY) / spanY) * (h - padT - padB);
+  const path = points.map((p, i) => `${i ? "L" : "M"}${px(p.t).toFixed(1)},${py(p.v).toFixed(1)}`).join(" ");
+  const area = `${path} L${px(maxX).toFixed(1)},${(h - padB).toFixed(1)} L${px(minX).toFixed(1)},${(h - padB).toFixed(1)} Z`;
+  let grid = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = minY + (spanY * i) / 4;
+    const y = py(v).toFixed(1);
+    grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" style="stroke:var(--border-muted)"/>`;
+    grid += `<text x="${padL - 6}" y="${+y + 4}" text-anchor="end" font-size="10" style="fill:var(--text-faint)">${Math.round(v)}</text>`;
+  }
+  const fmt = (t) => new Date(t).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+  box.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto">
+    ${grid}
+    <path d="${area}" style="fill:var(--accent-soft)" stroke="none"/>
+    <path d="${path}" fill="none" style="stroke:var(--accent)" stroke-width="2"/>
+    <text x="${padL}" y="${h - 8}" font-size="10" style="fill:var(--text-faint)">${fmt(minX)}</text>
+    <text x="${w - padR}" y="${h - 8}" text-anchor="end" font-size="10" style="fill:var(--text-faint)">${fmt(maxX)}</text>
+  </svg>`;
+}
+
+// ---------------- 同步 ----------------
+
+async function syncNow() {
+  try {
+    const r = await api("/api/sync/run", { method: "POST" });
+    showToast(`同步完成：成功 ${r.done}，失败 ${r.failed}`);
+    await loadOverview();
   } catch (e) {
     showToast(e.message);
   }
 }
 
-function updateLastRefresh() {
-  document.getElementById("lastRefresh").textContent =
-    "更新于 " + new Date().toLocaleTimeString("zh-CN");
+async function openSyncModal() {
+  try {
+    const d = await api("/api/tasks");
+    document.getElementById("syncInterval").value = d.config.interval_seconds;
+    document.getElementById("syncConcurrency").value = d.config.concurrency;
+    document.getElementById("syncBackoff").value = d.config.base_backoff_seconds;
+    document.getElementById("syncModal").classList.remove("hidden");
+  } catch (e) {
+    showToast(e.message);
+  }
 }
 
-// ---------------- 模态框 ----------------
+async function saveSyncSettings() {
+  try {
+    await api("/api/sync/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: Number(document.getElementById("syncInterval").value) > 0,
+        interval_seconds: Number(document.getElementById("syncInterval").value),
+        concurrency: Number(document.getElementById("syncConcurrency").value),
+        base_backoff_seconds: Number(document.getElementById("syncBackoff").value),
+      }),
+    });
+    document.getElementById("syncModal").classList.add("hidden");
+    showToast("同步设置已保存");
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+// ---------------- 预取 ----------------
+
+function togglePrefetch() {
+  state.prefetchEnabled = !state.prefetchEnabled;
+  const btn = document.getElementById("prefetchBtn");
+  btn.classList.toggle("active", state.prefetchEnabled);
+  btn.textContent = state.prefetchEnabled ? "预取·开" : "预取·关";
+  showToast(state.prefetchEnabled ? "已开启详情预取" : "已关闭详情预取");
+}
+
+// ---------------- 版本 ----------------
+
+async function loadVersion() {
+  try {
+    const v = await api("/api/version");
+    const btn = document.getElementById("versionBtn");
+    btn.textContent = "v" + v.version;
+    btn.style.display = "";
+  } catch (e) { /* ignore */ }
+}
+
+async function checkUpdate() {
+  try {
+    const r = await api("/api/update-check");
+    if (!r.ok) { showToast(r.error || "无法检查更新"); return; }
+    const cur = (document.getElementById("versionBtn").textContent || "").replace(/^v/, "");
+    if (r.latest && r.latest !== cur) showToast(`有新版本 ${r.latest}`);
+    else showToast("已是最新版本");
+  } catch (e) { showToast("检查更新失败"); }
+}
+
+// ---------------- 通用 ----------------
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+function downloadJson(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ---------------- 添加账号 ----------------
 
 function openModal() {
   document.getElementById("modal").classList.remove("hidden");
-  document.getElementById("fLabel").focus();
+  document.getElementById("fUsername").focus();
 }
 
 function closeModal() {
   document.getElementById("modal").classList.add("hidden");
-  document.getElementById("fLabel").value = "";
-  document.getElementById("fUsername").value = "";
-  document.getElementById("fToken").value = "";
-  document.getElementById("fGroup").value = "";
+  ["fLabel", "fUsername", "fGroup", "fTags", "fNote", "fToken"].forEach((id) => (document.getElementById(id).value = ""));
+  document.getElementById("fType").value = "personal";
   document.getElementById("testResult").textContent = "";
-}
-
-function openBackupModal() {
-  document.getElementById("backupModal").classList.remove("hidden");
-  document.getElementById("backupResult").textContent = "";
-  document.getElementById("importFile").value = "";
-}
-
-function closeBackupModal() {
-  document.getElementById("backupModal").classList.add("hidden");
-}
-
-async function exportBackup() {
-  if (!confirm("备份文件包含 Token 明文，确定导出吗？")) return;
-  const pwd = prompt("为备份设置密码（留空则不加密，密码不会保存在任何地方）", "");
-  if (pwd === null) return; // 用户取消
-  try {
-    const resp = await fetch("/api/accounts/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pwd }),
-    });
-    if (!resp.ok) throw new Error("导出失败");
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const day = new Date().toISOString().slice(0, 10);
-    a.download = pwd ? `github-accounts-backup-encrypted-${day}.json` : `github-accounts-backup-${day}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast(pwd ? "已导出加密备份" : "备份已导出");
-  } catch (e) {
-    showToast(e.message);
-  }
-}
-
-async function importBackup(file) {
-  const box = document.getElementById("backupResult");
-  try {
-    const text = await file.text();
-    const data = JSON.parse(text);
-    let password = "";
-    if (data.encrypted) {
-      const entered = prompt("该备份已加密，请输入密码", "");
-      if (entered === null) return; // 用户取消
-      password = entered;
-    }
-    const body = Object.assign({}, data, { password });
-    const result = await api("/api/accounts/import", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    box.className = "test-result ok";
-    box.textContent = `✓ 导入完成：新增 ${result.added} 个，更新 ${result.updated} 个${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`;
-    state.detailCache = {}; // 导入可能改动账号，清空详情缓存
-    await refreshAll();
-  } catch (e) {
-    box.className = "test-result fail";
-    box.textContent = "导入失败：" + e.message;
-  }
 }
 
 async function testConnection() {
   const username = document.getElementById("fUsername").value.trim();
   const token = document.getElementById("fToken").value.trim();
   const box = document.getElementById("testResult");
-  if (!username || !token) {
-    box.className = "test-result fail";
-    box.textContent = "请填写用户名和 Token";
-    return;
-  }
+  if (!username || !token) { box.className = "test-result fail"; box.textContent = "请填写用户名和 Token"; return; }
   box.className = "test-result";
   box.textContent = "测试中…";
   try {
-    const v = await api("/api/verify", {
-      method: "POST",
-      body: JSON.stringify({ label: "", username, token }),
-    });
-    if (v.status === "active") {
-      box.className = "test-result ok";
-      box.textContent = `✓ 连接成功：@${v.user?.login || username}`;
-    } else {
-      box.className = "test-result fail";
-      box.textContent = `✗ ${v.error || "连接失败"}`;
-    }
+    const v = await api("/api/verify", { method: "POST", body: JSON.stringify({ username, token }) });
+    box.className = v.status === "active" ? "test-result ok" : "test-result fail";
+    box.textContent = v.status === "active" ? `✓ 连接成功：@${v.user?.login || username}` : `✗ ${v.error || "连接失败"}`;
   } catch (e) {
     box.className = "test-result fail";
     box.textContent = e.message;
@@ -1104,67 +861,73 @@ async function saveAccount() {
   const username = document.getElementById("fUsername").value.trim();
   const token = document.getElementById("fToken").value.trim();
   const group = document.getElementById("fGroup").value.trim();
-  if (!username || !token) {
-    showToast("请填写用户名和 Token");
-    return;
-  }
+  const type = document.getElementById("fType").value;
+  const tags = document.getElementById("fTags").value.split(",").map((t) => t.trim()).filter(Boolean);
+  const note = document.getElementById("fNote").value.trim();
+  if (!username || !token) { showToast("请填写用户名和 Token"); return; }
   try {
-    const saved = await api("/api/accounts", {
-      method: "POST",
-      body: JSON.stringify({ label, username, token, group }),
-    });
+    await api("/api/accounts", { method: "POST", body: JSON.stringify({ label, username, token, group, type, tags, note }) });
     showToast("已保存");
     closeModal();
-    // 乐观更新：立刻在侧栏看到，并切到新账号加载其详情
-    upsertLocalAccount(saved);
-    selectAccount(saved.id);
-    await refreshAll();
+    await loadAccountsPage(false);
+    await loadOverview();
   } catch (e) {
     showToast(e.message);
   }
 }
 
-// ---------------- 版本 / 更新 ----------------
+// ---------------- 备份 ----------------
 
-async function loadVersion() {
-  try {
-    const v = await api("/api/version");
-    const btn = document.getElementById("versionBtn");
-    if (btn && v.version) {
-      btn.textContent = "v" + v.version;
-      btn.style.display = "";
-      btn.addEventListener("click", checkUpdate);
-    }
-  } catch (e) { /* 旧版后端没有该接口，忽略 */ }
+function closeBackupModal() {
+  document.getElementById("backupModal").classList.add("hidden");
 }
 
-function cmpVersion(a, b) {
-  const pa = String(a).replace(/^v/, "").split(".").map(Number);
-  const pb = String(b).replace(/^v/, "").split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    const x = pa[i] || 0;
-    const y = pb[i] || 0;
-    if (x !== y) return x - y;
-  }
-  return 0;
-}
-
-async function checkUpdate() {
+async function exportBackup() {
   try {
-    const r = await api("/api/update-check");
-    if (!r.ok) {
-      showToast(r.error || "无法检查更新");
-      return;
-    }
-    const current = (document.getElementById("versionBtn").textContent || "").replace(/^v/, "");
-    if (r.latest && cmpVersion(r.latest, current) > 0) {
-      showToast(`有新版本 ${r.latest}，前往 GitHub 下载`);
-      if (r.url) window.open(r.url, "_blank");
-    } else {
-      showToast("已是最新版本");
-    }
+    const data = await api("/api/accounts/export");
+    downloadJson(data, `github-accounts-${new Date().toISOString().slice(0, 10)}.json`);
+    document.getElementById("backupResult").className = "test-result ok";
+    document.getElementById("backupResult").textContent = "✓ 已导出账号信息（不含凭据）";
   } catch (e) {
-    showToast("检查更新失败");
+    document.getElementById("backupResult").className = "test-result fail";
+    document.getElementById("backupResult").textContent = "导出失败：" + e.message;
+  }
+}
+
+async function exportCredBackup() {
+  const pwd = prompt("设置凭据备份密码（长度至少 4 位）", "");
+  if (pwd === null) return;
+  if (pwd.length < 4) { showToast("密码太短"); return; }
+  try {
+    const data = await api("/api/accounts/export", {
+      method: "POST",
+      body: JSON.stringify({ password: pwd }),
+    });
+    downloadJson(data, `github-accounts-encrypted-${new Date().toISOString().slice(0, 10)}.json`);
+    showToast("已导出加密凭据备份");
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function importBackup(file) {
+  const box = document.getElementById("backupResult");
+  try {
+    const data = JSON.parse(await file.text());
+    let password = "";
+    if (data.encrypted) {
+      password = prompt("该备份已加密，请输入密码", "") || "";
+    }
+    const result = await api("/api/accounts/import", {
+      method: "POST",
+      body: JSON.stringify({ ...data, password }),
+    });
+    box.className = "test-result ok";
+    box.textContent = `✓ 导入完成：新增 ${result.added}，更新 ${result.updated}${result.skipped ? `，跳过 ${result.skipped}` : ""}`;
+    await loadAccountsPage(false);
+  } catch (e) {
+    box.className = "test-result fail";
+    box.textContent = "导入失败：" + e.message;
   }
 }
 
@@ -1187,45 +950,32 @@ async function doGlobalSearch() {
   const q = document.getElementById("globalSearchInput").value.trim();
   const kind = document.getElementById("globalSearchKind").value;
   const box = document.getElementById("globalSearchResults");
-  if (!q) {
-    box.innerHTML = `<div class="empty-tab">输入关键字开始搜索</div>`;
-    return;
-  }
-  box.innerHTML = `<div class="empty-tab">搜索中…（会查询 ${state.accounts.length} 个账号）</div>`;
+  if (!q) { box.innerHTML = `<div class="empty-tab">输入关键字开始搜索</div>`; return; }
+  box.innerHTML = `<div class="empty-tab">搜索中…</div>`;
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(q)}&kind=${encodeURIComponent(kind)}`);
     const results = data.results || [];
-    if (!results.length) {
-      box.innerHTML = `<div class="empty-tab">没有匹配的结果（共查询 ${data.accounts} 个账号）</div>`;
-      return;
-    }
-    box.innerHTML =
-      `<div class="item-list">` +
-      results
-        .map(
-          (r) => `
-      <div class="item">
-        <div class="item-icon ${kind === "issue" ? "issue" : "pr"}">#${r.number}</div>
-        <div class="item-body">
-          <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>
-          <div class="item-meta">
-            <span class="repo-tag">${escapeHtml(r.repository)}</span>
-            <span class="label-tag">${escapeHtml(r.account_label)}</span>
-            ${(r.labels || []).map((l) => `<span class="label-tag">${escapeHtml(l)}</span>`).join("")}
-          </div>
-        </div>
-        <span class="item-time">${relTime(r.created_at)}</span>
-      </div>`
-        )
-        .join("") +
-      `</div>
-      <div class="trend-footer"><span>共 ${data.total} 条结果，搜索了 ${data.accounts} 个账号</span></div>`;
+    box.innerHTML = results.length
+      ? `<div class="item-list">${results.map((r) => `
+          <div class="item">
+            <div class="item-body">
+              <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>
+              <div class="item-meta">
+                <span class="tag">${escapeHtml(r.repository)}</span>
+                <span class="tag">${escapeHtml(r.account_label)}</span>
+                ${(r.labels || []).map((l) => `<span class="tag">${escapeHtml(l)}</span>`).join("")}
+              </div>
+            </div>
+            <span class="item-time">${relTime(r.created_at)}</span>
+          </div>`).join("")}</div>
+        <div style="margin-top:10px;font-size:12px;color:var(--text-faint)">共 ${data.total} 条，搜索了 ${data.accounts} 个账号</div>`
+      : `<div class="empty-tab">没有匹配的结果</div>`;
   } catch (e) {
     box.innerHTML = `<div class="empty-tab">搜索失败：${escapeHtml(e.message)}</div>`;
   }
 }
 
-// ---------------- 外部通知设置 ----------------
+// ---------------- 外部通知 ----------------
 
 function maskUrl(url) {
   if (!url) return "";
@@ -1243,6 +993,10 @@ async function openNotifyModal() {
   await loadNotifyChannels();
 }
 
+function closeNotifyModal() {
+  document.getElementById("notifyModal").classList.add("hidden");
+}
+
 async function loadNotifyChannels() {
   try {
     const data = await api("/api/notifications/settings");
@@ -1256,45 +1010,37 @@ async function loadNotifyChannels() {
 function renderNotifyChannels() {
   const box = document.getElementById("notifyChannels");
   if (!state.notifyChannels.length) {
-    box.innerHTML = `<div class="empty-tab">还没有配置通知渠道，添加一个吧</div>`;
+    box.innerHTML = `<div class="empty-tab">还没有配置通知渠道</div>`;
     return;
   }
-  box.innerHTML = state.notifyChannels
-    .map(
-      (c, i) => `
+  box.innerHTML = state.notifyChannels.map((c, i) => `
     <div class="notify-row">
       <span class="notify-name">${escapeHtml(c.name || c.type)}</span>
-      <span class="label-tag">${escapeHtml(c.type)}</span>
+      <span class="tag">${escapeHtml(c.type)}</span>
       <span class="notify-url">${escapeHtml(maskUrl(c.url))}</span>
-      <label class="notify-enabled">
+      <label style="display:inline-flex;align-items:center;gap:4px;color:var(--text-muted)">
         <input type="checkbox" data-notify-enable="${i}" ${c.enabled ? "checked" : ""}> 启用
       </label>
-      <button class="btn" data-notify-del="${i}" title="删除该渠道">删除</button>
-    </div>`
-    )
-    .join("");
-
-  box.querySelectorAll("[data-notify-enable]").forEach((cb) => {
+      <button class="btn btn-sm" data-notify-del="${i}">删除</button>
+    </div>`).join("");
+  box.querySelectorAll("[data-notify-enable]").forEach((cb) =>
     cb.addEventListener("change", async () => {
       state.notifyChannels[Number(cb.dataset.notifyEnable)].enabled = cb.checked;
       await saveNotifyChannels();
-    });
-  });
-  box.querySelectorAll("[data-notify-del]").forEach((btn) => {
+    })
+  );
+  box.querySelectorAll("[data-notify-del]").forEach((btn) =>
     btn.addEventListener("click", async () => {
       state.notifyChannels.splice(Number(btn.dataset.notifyDel), 1);
       await saveNotifyChannels();
       renderNotifyChannels();
-    });
-  });
+    })
+  );
 }
 
 async function saveNotifyChannels() {
   try {
-    await api("/api/notifications/settings", {
-      method: "POST",
-      body: JSON.stringify({ channels: state.notifyChannels }),
-    });
+    await api("/api/notifications/settings", { method: "POST", body: JSON.stringify({ channels: state.notifyChannels }) });
   } catch (e) {
     showToast(e.message);
   }
@@ -1304,10 +1050,7 @@ async function addNotifyChannel() {
   const type = document.getElementById("notifyType").value;
   const name = document.getElementById("notifyName").value.trim() || type;
   const url = document.getElementById("notifyUrl").value.trim();
-  if (!url) {
-    showToast("请填写推送 URL");
-    return;
-  }
+  if (!url) { showToast("请填写推送 URL"); return; }
   state.notifyChannels.push({ type, name, url, enabled: true });
   document.getElementById("notifyName").value = "";
   document.getElementById("notifyUrl").value = "";
@@ -1318,294 +1061,159 @@ async function addNotifyChannel() {
 
 async function testNotification() {
   const box = document.getElementById("notifyResult");
-  if (!state.notifyChannels.length) {
-    box.className = "test-result fail";
-    box.textContent = "请先添加通知渠道";
-    return;
-  }
+  if (!state.notifyChannels.length) { box.className = "test-result fail"; box.textContent = "请先添加通知渠道"; return; }
   box.className = "test-result";
   box.textContent = "发送中…";
   try {
     const r = await api("/api/notifications/test", { method: "POST" });
     box.className = "test-result ok";
-    box.textContent = `✓ 已发送到 ${r.sent} 个渠道，请在设备上确认`;
+    box.textContent = `✓ 已发送到 ${r.sent} 个渠道`;
   } catch (e) {
     box.className = "test-result fail";
     box.textContent = "发送失败：" + e.message;
   }
 }
 
-function closeNotifyModal() {
-  document.getElementById("notifyModal").classList.add("hidden");
+// ---------------- 账号列表交互 ----------------
+
+function clearAccountSearch() {
+  document.getElementById("accountSearch").value = "";
+  state.accountQuery.query = "";
+  state.accounts.page = 1;
+  loadAccountsPage();
+  document.getElementById("accountSearch").focus();
 }
 
-// ---------------- 通知 / 刷新间隔 ----------------
-
-async function toggleNotifications() {
-  if (state.notifications) {
-    state.notifications = false;
-    updateNotifyBtn();
-    showToast("已关闭变化提醒");
-    return;
-  }
-  if (!("Notification" in window)) {
-    showToast("当前浏览器不支持桌面通知");
-    return;
-  }
-  if (Notification.permission === "denied") {
-    showToast("通知权限已在浏览器设置中被拒绝，请先允许");
-    return;
-  }
-  const perm = await Notification.requestPermission();
-  state.notifications = perm === "granted";
-  updateNotifyBtn();
-  showToast(state.notifications ? "已开启变化提醒" : "通知权限被拒绝");
+function toggleSortOrder() {
+  state.accountQuery.order = state.accountQuery.order === "desc" ? "asc" : "desc";
+  document.getElementById("sortOrder").textContent = state.accountQuery.order === "desc" ? "↓ 降序" : "↑ 升序";
+  state.accounts.page = 1;
+  loadAccountsPage();
 }
 
-function updateNotifyBtn() {
-  const btn = document.getElementById("notifyBtn");
-  if (!btn) return;
-  btn.classList.toggle("active", state.notifications);
-  btn.textContent = state.notifications ? "提醒·开" : "提醒";
-}
-
-function startRefreshTimer() {
-  if (state.timer) {
-    clearInterval(state.timer);
-    state.timer = null;
-  }
-  const sec = Number(document.getElementById("refreshInterval").value);
-  if (sec > 0) state.timer = setInterval(() => refreshAll(), sec * 1000);
-}
-
-// ---------------- 主题 ----------------
-
-const THEME_KEY = "gh-theme";
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  const btn = document.getElementById("themeBtn");
-  if (btn) btn.textContent = theme === "light" ? "◑" : "◐";
-}
-
-function toggleTheme() {
-  const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
-  const next = current === "light" ? "dark" : "light";
-  applyTheme(next);
-  try {
-    localStorage.setItem(THEME_KEY, next);
-  } catch (e) { /* 隐私模式下可能失败，忽略 */ }
-}
-
-function initTheme() {
-  let saved = null;
-  try {
-    saved = localStorage.getItem(THEME_KEY);
-  } catch (e) { /* ignore */ }
-  if (saved !== "light" && saved !== "dark") {
-    const prefersLight =
-      window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
-    saved = prefersLight ? "light" : "dark";
-  }
-  applyTheme(saved);
-}
-
-// ---------------- 账号列表高亮（键盘导航用）----------------
-
-function getVisibleAccounts() {
-  const query = state.searchQuery.trim().toLowerCase();
-  if (!query) return state.accounts;
-  return state.accounts.filter((a) => {
-    const user = a.user || {};
-    return (
-      (a.label || "").toLowerCase().includes(query) ||
-      (a.username || "").toLowerCase().includes(query) ||
-      (user.login || "").toLowerCase().includes(query)
-    );
+function toggleCheckAll() {
+  const checkAll = document.getElementById("checkAll");
+  const boxes = document.querySelectorAll("#accountTableBody [data-check]");
+  boxes.forEach((cb) => {
+    cb.checked = checkAll.checked;
+    const id = Number(cb.dataset.check);
+    if (checkAll.checked) state.selected.add(id);
+    else state.selected.delete(id);
   });
-}
-
-function moveHighlight(delta) {
-  const list = getVisibleAccounts();
-  if (!list.length) return;
-  const idx = list.findIndex((a) => a.id === state.highlightId);
-  const nextIdx =
-    idx === -1 ? (delta > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, idx + delta));
-  state.highlightId = list[nextIdx].id;
-  renderAccountList();
-  const card = document.querySelector(`.account-card[data-id="${state.highlightId}"]`);
-  if (card) card.scrollIntoView({ block: "nearest" });
-}
-
-function openHighlighted() {
-  if (state.highlightId) selectAccount(state.highlightId);
+  updateBatchBar();
 }
 
 // ---------------- 快捷键 ----------------
 
-const TAB_ORDER = ["overview", "review", "mypr", "issues", "events", "repos"];
-
-function isTypingTarget() {
-  const el = document.activeElement;
-  return (
-    !!el &&
-    (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)
-  );
-}
-
-function anyModalOpen() {
-  return ["modal", "backupModal", "shortcutsModal", "searchModal", "notifyModal"].some(
-    (id) => !document.getElementById(id).classList.contains("hidden")
-  );
-}
-
-function openShortcutsModal() {
-  document.getElementById("shortcutsModal").classList.remove("hidden");
-}
-
-function closeShortcutsModal() {
-  document.getElementById("shortcutsModal").classList.add("hidden");
-}
-
-document.addEventListener("keydown", (e) => {
+function onKeydown(e) {
   if (e.key === "Escape") {
-    closeModal();
-    closeBackupModal();
-    closeShortcutsModal();
-    closeSearchModal();
-    closeNotifyModal();
+    ["modal", "backupModal", "searchModal", "notifyModal", "syncModal", "shortcutsModal"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add("hidden");
+    });
     return;
   }
-  if (isTypingTarget()) return;
-  if (anyModalOpen()) return; // 弹窗打开时只响应 Esc
-  // Ctrl/⌘ + K 全局搜索
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    openSearchModal();
-    return;
-  }
+  const typing = document.activeElement && ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+  if (typing) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openSearchModal(); return; }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "t") toggleTheme();
+  if (k === "r") syncNow();
+  if (k === "a") openModal();
+  if (k === "/") { e.preventDefault(); openSearchModal(); }
+}
 
-  const key = e.key.toLowerCase();
-  if (key >= "1" && key <= "6") {
-    const tab = TAB_ORDER[Number(key) - 1];
-    if (tab) {
-      state.activeTab = tab;
-      renderTab();
-    }
-    return;
-  }
+// ---------------- 事件绑定 ----------------
 
-  switch (key) {
-    case "t":
-      toggleTheme();
-      break;
-    case "r":
-      refreshAll();
-      break;
-    case "a":
-      openModal();
-      break;
-    case "/":
-      e.preventDefault();
-      document.getElementById("searchInput").focus();
-      break;
-    case "?":
-      e.preventDefault();
-      openShortcutsModal();
-      break;
-    case "j":
-    case "arrowdown":
-      e.preventDefault();
-      moveHighlight(1);
-      break;
-    case "k":
-    case "arrowup":
-      e.preventDefault();
-      moveHighlight(-1);
-      break;
-    case "enter":
-      e.preventDefault();
-      openHighlighted();
-      break;
-  }
-});
+function bindEvents() {
+  document.querySelectorAll(".nav-item").forEach((n) => n.addEventListener("click", () => go(n.dataset.page)));
+  document.getElementById("viewAllAccounts").addEventListener("click", () => go("accounts"));
+  document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);
+  document.getElementById("syncNowBtn").addEventListener("click", syncNow);
+  document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
+  document.getElementById("prefetchBtn").addEventListener("click", togglePrefetch);
+  document.getElementById("notifyBtn").addEventListener("click", openNotifyModal);
+  document.getElementById("themeBtn").addEventListener("click", toggleTheme);
+  document.getElementById("addBtn").addEventListener("click", openModal);
+  document.getElementById("versionBtn").addEventListener("click", checkUpdate);
 
-// ---------------- 事件绑定与启动 ----------------
+  document.getElementById("cancelBtn").addEventListener("click", closeModal);
+  document.getElementById("saveBtn").addEventListener("click", saveAccount);
+  document.getElementById("testBtn").addEventListener("click", testConnection);
+  document.getElementById("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
 
-document.getElementById("refreshBtn").addEventListener("click", () => refreshAll());
-document.getElementById("notifyBtn").addEventListener("click", toggleNotifications);
-document.getElementById("refreshInterval").addEventListener("change", startRefreshTimer);
-document.getElementById("addBtn").addEventListener("click", openModal);
-document.getElementById("cancelBtn").addEventListener("click", closeModal);
-document.getElementById("saveBtn").addEventListener("click", saveAccount);
-document.getElementById("testBtn").addEventListener("click", testConnection);
+  document.getElementById("exportBtn").addEventListener("click", exportBackup);
+  document.getElementById("exportCredBtn").addEventListener("click", exportCredBackup);
+  document.getElementById("importFile").addEventListener("change", (e) => { if (e.target.files[0]) importBackup(e.target.files[0]); });
+  document.getElementById("backupCloseBtn").addEventListener("click", closeBackupModal);
+  document.getElementById("backupModal").addEventListener("click", (e) => { if (e.target.id === "backupModal") closeBackupModal(); });
 
-document.getElementById("searchInput").addEventListener("input", (e) => {
-  state.searchQuery = e.target.value;
-  renderAccountList();
-});
-document.getElementById("searchInput").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    e.stopPropagation();
-    clearSearch();
-  }
-});
-document.getElementById("clearSearch").addEventListener("click", clearSearch);
-
-document.getElementById("modal").addEventListener("click", (e) => {
-  if (e.target.id === "modal") closeModal();
-});
-
-document.getElementById("backupBtn").addEventListener("click", openBackupModal);
-document.getElementById("backupCloseBtn").addEventListener("click", closeBackupModal);
-document.getElementById("backupModal").addEventListener("click", (e) => {
-  if (e.target.id === "backupModal") closeBackupModal();
-});
-document.getElementById("exportBtn").addEventListener("click", exportBackup);
-document.getElementById("importFile").addEventListener("change", (e) => {
-  if (e.target.files && e.target.files[0]) importBackup(e.target.files[0]);
-});
-
-document.getElementById("themeBtn").addEventListener("click", toggleTheme);
-document.getElementById("shortcutsBtn").addEventListener("click", openShortcutsModal);
-document.getElementById("shortcutsCloseBtn").addEventListener("click", closeShortcutsModal);
-document.getElementById("shortcutsModal").addEventListener("click", (e) => {
-  if (e.target.id === "shortcutsModal") closeShortcutsModal();
-});
-
-document.getElementById("prefetchBtn").addEventListener("click", togglePrefetch);
-document.getElementById("notifyBtn").addEventListener("click", openNotifyModal);
-document.getElementById("notifyCloseBtn").addEventListener("click", closeNotifyModal);
-document.getElementById("notifyModal").addEventListener("click", (e) => {
-  if (e.target.id === "notifyModal") closeNotifyModal();
-});
-document.getElementById("notifyAddBtn").addEventListener("click", addNotifyChannel);
-document.getElementById("notifyTestBtn").addEventListener("click", testNotification);
-document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);document.getElementById("searchCloseBtn").addEventListener("click", closeSearchModal);
-document.getElementById("searchModal").addEventListener("click", (e) => {
-  if (e.target.id === "searchModal") closeSearchModal();
-});
-document.getElementById("globalSearchInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") doGlobalSearch();
-});
-document.getElementById("globalSearchKind").addEventListener("change", () => {
-  if (document.getElementById("globalSearchInput").value.trim()) doGlobalSearch();
-});
-
-document.querySelectorAll("#tabs .tab").forEach((t) => {
-  t.addEventListener("click", () => {
-    state.activeTab = t.dataset.tab;
-    renderTab();
+  document.getElementById("searchCloseBtn").addEventListener("click", closeSearchModal);
+  document.getElementById("searchModal").addEventListener("click", (e) => { if (e.target.id === "searchModal") closeSearchModal(); });
+  document.getElementById("globalSearchInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doGlobalSearch(); });
+  document.getElementById("globalSearchKind").addEventListener("change", () => {
+    if (document.getElementById("globalSearchInput").value.trim()) doGlobalSearch();
   });
-});
+
+  document.getElementById("notifyCloseBtn").addEventListener("click", closeNotifyModal);
+  document.getElementById("notifyModal").addEventListener("click", (e) => { if (e.target.id === "notifyModal") closeNotifyModal(); });
+  document.getElementById("notifyAddBtn").addEventListener("click", addNotifyChannel);
+  document.getElementById("notifyTestBtn").addEventListener("click", testNotification);
+
+  document.getElementById("syncSaveBtn").addEventListener("click", saveSyncSettings);
+  document.getElementById("openSyncSettings").addEventListener("click", openSyncModal);
+  document.getElementById("automationSyncNow").addEventListener("click", syncNow);
+  document.getElementById("syncCloseBtn").addEventListener("click", () => document.getElementById("syncModal").classList.add("hidden"));
+  document.getElementById("syncModal").addEventListener("click", (e) => { if (e.target.id === "syncModal") document.getElementById("syncModal").classList.add("hidden"); });
+  document.getElementById("syncNowBtn").addEventListener("dblclick", openSyncModal);
+
+  document.getElementById("accountSearch").addEventListener("input", debounce(() => {
+    state.accountQuery.query = document.getElementById("accountSearch").value;
+    state.accounts.page = 1;
+    loadAccountsPage();
+  }, 300));
+  document.getElementById("clearAccountSearch").addEventListener("click", clearAccountSearch);
+  document.getElementById("filterStatus").addEventListener("change", (e) => { state.accountQuery.status = e.target.value; state.accounts.page = 1; loadAccountsPage(); });
+  document.getElementById("filterType").addEventListener("change", (e) => { state.accountQuery.type = e.target.value; state.accounts.page = 1; loadAccountsPage(); });
+  document.getElementById("filterGroup").addEventListener("change", (e) => { state.accountQuery.group = e.target.value; state.accounts.page = 1; loadAccountsPage(); });
+  document.getElementById("filterTag").addEventListener("change", (e) => { state.accountQuery.tag = e.target.value; state.accounts.page = 1; loadAccountsPage(); });
+  document.getElementById("sortBy").addEventListener("change", (e) => { state.accountQuery.sort = e.target.value; state.accounts.page = 1; loadAccountsPage(); });
+  document.getElementById("sortOrder").addEventListener("click", toggleSortOrder);
+  document.getElementById("prevPage").addEventListener("click", () => { if (state.accounts.page > 1) { state.accounts.page--; loadAccountsPage(); } });
+  document.getElementById("nextPage").addEventListener("click", () => { if (state.accounts.page < state.accounts.total_pages) { state.accounts.page++; loadAccountsPage(); } });
+  document.getElementById("pageSize").addEventListener("change", (e) => { state.accounts.page_size = Number(e.target.value); state.accounts.page = 1; loadAccountsPage(); });
+  document.getElementById("checkAll").addEventListener("change", toggleCheckAll);
+  document.getElementById("batchRefresh").addEventListener("click", batchRefresh);
+  document.getElementById("batchExport").addEventListener("click", batchExport);
+
+  document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
+    document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));
+    loadOverviewActivities(c.dataset.type);
+  }));
+
+  document.getElementById("todoPriority").addEventListener("change", loadTodos);
+  document.getElementById("todoType").addEventListener("change", loadTodos);
+  document.getElementById("todoAccount").addEventListener("change", loadTodos);
+
+  document.getElementById("backToAccounts").addEventListener("click", () => go("accounts"));
+  document.getElementById("detailSyncBtn").addEventListener("click", () => { if (state.detail) syncAccount(state.detail.id); });
+  document.querySelectorAll("#detailTabs .tab").forEach((t) => t.addEventListener("click", () => {
+    state.detailTab = t.dataset.tab;
+    renderDetailTab(state.detail);
+  }));
+
+  document.addEventListener("keydown", onKeydown);
+}
+
+// ---------------- 初始化 ----------------
 
 async function init() {
-  initTheme();
-  await refreshAll(true);
-  startRefreshTimer();
-  updateNotifyBtn();
-  updatePrefetchBtn();
+  applyTheme(document.documentElement.dataset.theme || "light");
+  bindEvents();
+  await loadOverview();
+  await loadAccountsPage(false);
+  await loadTodos();
   loadVersion();
 }
 

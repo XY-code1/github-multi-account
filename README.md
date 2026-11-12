@@ -1,6 +1,25 @@
-# GitHub 多账号状态仪表盘
+# GitHub 多账号运维中心
 
-一个本地 Web 仪表盘，用多个 GitHub PAT Token 管理多个账号，一屏查看每个账号的：
+面向**数百个 GitHub 账号**的运维中心：全局状态总览、跨账号统一待办、后台自动同步、服务端搜索/筛选/排序/分页。
+
+## 页面结构
+
+| 页面 | 用途 |
+| --- | --- |
+| **账号总览**（默认首页） | 全局统计卡、今日需要处理（按优先级）、最近活动 |
+| **全部账号** | 服务端分页表格、搜索/筛选/排序、批量操作 |
+| **统一待办** | 跨账号聚合 Review 请求、PR、Issue、凭据/配额/同步异常 |
+| **自动化任务** | 同步配置、任务进度、审计日志 |
+| **账号详情**（二级） | 概览、账号对比、PR/Issue、动态、仓库、历史趋势 |
+
+## 核心能力
+
+- **后台同步引擎**：定时同步所有账号（默认 15 分钟、并发 3），失败隔离 + 指数退避重试，结果写入本地缓存
+- **全局聚合接口**：`/api/dashboard/summary`、`/api/dashboard/tasks`、`/api/dashboard/activities`，全部读缓存，打开页面不会打爆 GitHub
+- **服务端账号查询**：`page`/`pageSize`/`query`/`status`/`type`/`group`/`tags`/`sort`/`order`，支持数百账号
+- **账号元数据**：别名、内部编号、标签、分组、备注、类型（个人/Bot/组织）
+- **安全**：Token 加密存储、导出默认不含明文、审计日志、敏感字段脱敏
+- 历史快照 + 趋势、外部通知（Bark/Server酱/企业微信/Webhook）、全局搜索、主题切换、快捷键
 
 - **登录有效性** —— Token 是否有效、是否过期、速率限制剩余
 - **数据概览** —— 粉丝 / 关注 / 总 Star 统计，仓库 Star 排行与分布可视化
@@ -27,6 +46,8 @@
 ## 快速开始
 
 **单文件 exe 版（推荐分发给别人）**：
+
+> ⚠️ exe 目前仍是**单账号详情版**（Go 后端尚未同步运维中心的新接口），可独立分发使用；Python 版已包含全部新功能。
 
 直接双击项目根目录的 **`GitHub仪表盘.exe`** —— **无需 Python、无需安装任何依赖**，单文件、无控制台窗口、自动打开浏览器。它和 Python 版共用同一份 `config/` 配置（账号、通知渠道、历史数据都在里面），Token 不用重录。详见 [go-app/README.md](go-app/README.md)。
 
@@ -99,7 +120,6 @@ accounts:
 | `Esc` | 关闭弹窗 / 清除搜索 |
 | `Ctrl/⌘ + K` | 全局搜索 |
 | `?` | 查看本说明 |
-
 > 快捷键在输入框内不会触发。主题偏好保存在浏览器本地存储，首次访问跟随系统。
 
 ## API
@@ -115,14 +135,24 @@ accounts:
 | GET | `/api/accounts/export` | 导出账号备份（含明文 Token） |
 | POST | `/api/accounts/import` | 从备份导入账号 |
 | GET | `/api/history/{id}` | 账号历史快照（时间升序） |
-| POST | `/api/snapshot/{id}` | 立即记录一条快照 |
+| GET | `/api/snapshot/{id}` | 立即记录一条快照 |
+| GET | `/api/dashboard/summary` | 全局账号总览 |
+| GET | `/api/dashboard/tasks` | 统一待办（按优先级排序） |
+| GET | `/api/dashboard/activities` | 跨账号最近动态 |
+| GET | `/api/accounts` | 账号列表，支持 `page/pageSize/query/status/type/group/tags/sort/order` |
+| POST | `/api/accounts/batch-refresh` | 批量刷新 |
+| POST | `/api/accounts/{id}/sync` | 立即同步单个账号 |
+| GET | `/api/tasks` | 同步引擎进度与配置 |
+| POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 |
+| POST | `/api/sync/run` | 立即触发全量同步 |
+| GET | `/api/audit` | 审计日志 |
 
 ## 技术栈
 
-- 后端：FastAPI + httpx（异步并发；汇总 / 详情接口分离；多账号并发限流）
-- 存储：SQLite（历史快照，保留 90 天 / 每账号 1000 条）+ Fernet 加密（Token 落盘）
-- 前端：原生 HTML/CSS/JS，GitHub 暗色主题，刷新间隔可配置（30 秒 ~ 10 分钟）
-- 测试：pytest（34 项，覆盖加密 / 迁移 / 导入导出 / 快照 / 容错 / API / CSRF）
+- 后端：FastAPI + httpx（汇总 / 详情接口分离；多账号并发限流；后台同步引擎）
+- 存储：SQLite（`sync_state` 同步状态、`rate_limits` 配额、`audit_log` 审计、`account_meta` 元数据、`summaries` 汇总缓存、`snapshots` 历史快照）+ Fernet 加密（Token 落盘）
+- 前端：原生 HTML/CSS/JS，GitHub 原生浅色 / 深色主题，四个一级页面 + 二级账号详情
+- 测试：pytest（账号分页/搜索/筛选/排序、聚合、失败隔离、Token 不外泄、加密、迁移、API、CSRF）
 
 ## 开发
 
@@ -141,6 +171,11 @@ python -m pytest          # 运行测试套件
 | `app/config.py` | 账号配置读写、加密迁移、导入导出、内存缓存 |
 | `app/crypto.py` | Fernet 加解密与本机密钥管理 |
 | `app/store.py` | SQLite 快照存储、节流、清理 |
+| `app/db.py` | 同步状态 / 配额 / 审计 / 元数据 / 汇总缓存 |
+| `app/sync.py` | 后台同步引擎（并发限制、失败隔离、指数退避） |
+| `app/dashboard.py` | 全局聚合（总览 / 统一待办 / 最近活动） |
+| `app/query.py` | 账号列表服务端查询（分页 / 搜索 / 筛选 / 排序） |
+| `app/notify.py` | 外部通知渠道（Bark / Server酱 / 企业微信 / Webhook） |
 | `static/app.js` | 前端全部逻辑 |
 | `find_port.py` | Windows 端口保留段探测 |
 | `Start-Hidden.vbs` | 无控制台窗口启动（双击运行） |
@@ -157,7 +192,9 @@ python -m pytest          # 运行测试套件
 
 **Windows 报 `WinError 10013`（访问套接字的权限不允许）？** 这不是端口被占用（那是 10048），而是 Hyper-V / WSL / Docker 预留了 TCP 端口段。用 `start.bat` 会自动跳过被保留的端口；也可用 `netsh interface ipv4 show excludedportrange protocol=tcp` 查看保留范围，或以管理员身份执行 `netsh int ipv4 add excludedportrange protocol=tcp startport=8000 numberofports=1` 释放 8000。
 
-**备份文件安全吗？** 页面导出的备份包含 **Token 明文**，请像密码一样保管（建议放在加密盘 / 密码管理器里）。日常使用时 Token 是加密存储的，明文只在导出备份时出现。
+**备份文件安全吗？** 页面导出分两种：**账号信息备份默认不含凭据**（只含用户名 / 别名 / 标签等）；如需备份 Token，用「导出凭据（加密）」，会要求设置密码（PBKDF2 + AES-GCM）。日常使用时 Token 是加密存储的。
+
+**几百个账号会不会打爆 GitHub？** 不会。所有数据由后台同步引擎定时写入本地缓存（`data/dashboard.db` 的 `summaries` 表），页面只读缓存。默认 15 分钟同步一次、并发 3，可在「设置」里调整。
 
 **历史数据存在哪？** `data/dashboard.db`（SQLite），已在 `.gitignore` 中。启动时会自动清理：超过 90 天或每个账号超过 1000 条的旧快照会被删除。删除该文件会清空所有历史趋势，但不影响账号配置。
 

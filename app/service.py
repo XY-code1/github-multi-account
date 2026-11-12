@@ -139,10 +139,18 @@ async def verify_token(username: str, token: str) -> dict[str, Any]:
         await client.aclose()
 
 
-async def fetch_account_summary(account: dict[str, Any]) -> dict[str, Any]:
-    """轻量汇总：登录态 + PR/Issue 计数（侧栏用，约 4 个请求）。"""
+async def fetch_account_summary(
+    account: dict[str, Any], include_events: bool = False
+) -> dict[str, Any]:
+    """轻量汇总：登录态 + PR/Issue 计数。
+
+    include_events=True 时额外拉取最近动态与配额（后台同步用）。
+    """
     token = account.get("token", "")
     result = _empty_result(account)
+    result["type"] = account.get("type", "personal")
+    result["group_name"] = account.get("group", "")
+    result["tags"] = account.get("tags", [])
     if not token:
         result["status"] = "invalid"
         result["error"] = "未配置 Token"
@@ -154,14 +162,16 @@ async def fetch_account_summary(account: dict[str, Any]) -> dict[str, Any]:
         if not login:
             return result
 
-        results = await asyncio.gather(
+        calls: list[Any] = [
             client.review_requested_prs(login),
             client.my_open_prs(login),
             client.assigned_issues(login),
-            return_exceptions=True,
-        )
+        ]
+        if include_events:
+            calls.append(client.received_events(login))
+        results = await asyncio.gather(*calls, return_exceptions=True)
         (review_res, mypr_res, issue_res), failed = _collect(
-            results, ("待处理 PR", "我的 PR", "分配 Issue")
+            results[:3], ("待处理 PR", "我的 PR", "分配 Issue")
         )
         if failed:
             result["warnings"] = failed
@@ -181,6 +191,15 @@ async def fetch_account_summary(account: dict[str, Any]) -> dict[str, Any]:
         result["followers_count"] = user.get("followers", 0)
         result["following_count"] = user.get("following", 0)
         result["public_repos"] = user.get("public_repos", 0)
+
+        if include_events:
+            events_res = results[3]
+            if not isinstance(events_res, BaseException):
+                result["events"] = events_res
+            try:
+                result["rate_limit"] = await client.rate_limit()
+            except Exception:  # noqa: BLE001
+                pass
     finally:
         await client.aclose()
     return result
