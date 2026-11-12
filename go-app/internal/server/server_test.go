@@ -10,6 +10,7 @@ import (
 	"testing/fstest"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/ops"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
 )
@@ -31,7 +32,14 @@ func newTestHandler(t *testing.T) http.Handler {
 		"static/app.js":    {Data: []byte("// app")},
 		"static/style.css": {Data: []byte("/* style */")},
 	}
-	return New(cfg, &service.Service{Store: st}, st, assets).Handler()
+	svc := &service.Service{Store: st}
+	if err := ops.Init(st.DB()); err != nil {
+		t.Fatalf("初始化运维中心失败: %v", err)
+	}
+	srv := New(cfg, svc, st, assets)
+	srv.SetOpsDB(st.DB())
+	srv.SetEngine(ops.NewEngine(st.DB(), cfg, svc, t.TempDir()))
+	return srv.Handler()
 }
 
 func do(h http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {

@@ -42,7 +42,7 @@ def _merged_rows() -> list[dict[str, Any]]:
         st = states.get(a["id"], {})
         rl = limits.get(a["id"], {})
         status = s.get("status") or st.get("last_status") or "unknown"
-        if st.get("consecutive_failures") or 0 >= 3 and status == "active":
+        if (st.get("consecutive_failures") or 0) >= 3 and status == "active":
             status = "sync_failed"
         remaining = int(rl.get("remaining") or 0) if rl else 0
         rows.append(

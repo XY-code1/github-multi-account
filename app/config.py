@@ -207,8 +207,15 @@ def mask_token(token: str) -> str:
     return f"{token[:4]}{'*' * 8}{token[-4:]}"
 
 
-def export_backup(password: str | None = None) -> dict[str, Any]:
-    """导出备份（含 Token 明文，请妥善保管）。提供密码时加密。"""
+def export_backup(
+    password: str | None = None, include_credentials: bool = True
+) -> dict[str, Any]:
+    """导出备份。
+
+    include_credentials=True 时包含 Token 明文（请妥善保管）；
+    为 False 时只导出账号信息，用于「账号信息备份」。
+    password 非空时对整份备份加密。
+    """
     accounts = load_accounts()
     data = {
         "version": 1,
@@ -223,7 +230,7 @@ def export_backup(password: str | None = None) -> dict[str, Any]:
                 "alias": a.get("alias", ""),
                 "note": a.get("note", ""),
                 "tags": a.get("tags", []),
-                "token": a["token"],
+                **({"token": a["token"]} if include_credentials else {}),
             }
             for a in accounts
         ],

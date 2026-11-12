@@ -39,6 +39,9 @@ type Status struct {
 	Username            string             `json:"username"`
 	TokenMasked         string             `json:"token_masked"`
 	Status              string             `json:"status"`
+	Type                string             `json:"type"`
+	GroupName           string             `json:"group_name"`
+	Tags                []string           `json:"tags"`
 	User                *github.User       `json:"user"`
 	Error               string             `json:"error"`
 	Warnings            []string           `json:"warnings"`
@@ -68,12 +71,19 @@ type Service struct {
 }
 
 func emptyStatus(acc config.Account) *Status {
+	typ := acc.Type
+	if typ == "" {
+		typ = "personal"
+	}
 	return &Status{
 		ID:               acc.ID,
 		Label:            acc.Label,
 		Username:         acc.Username,
 		TokenMasked:      acc.MaskedToken(),
 		Status:           "unknown",
+		Type:             typ,
+		GroupName:        acc.Group,
+		Tags:             nonNil(acc.Tags),
 		Warnings:         []string{},
 		LastChecked:      time.Now().UTC().Format(time.RFC3339),
 		ReviewPRs:        []github.IssueItem{},
@@ -189,6 +199,109 @@ func (s *Service) Summary(acc config.Account) *Status {
 	st.PublicRepos = user.PublicRepos
 	if len(failures) > 0 {
 		log.Printf("账号 %s 汇总部分失败: %v", acc.Username, failures)
+	}
+	return st
+}
+
+// SyncSummary 是后台同步用的汇总：在 Summary 的基础上额外拉取最近动态与 API 配额，
+// 结果写入本地缓存供仪表盘读取（不实时请求 GitHub）。
+func (s *Service) SyncSummary(acc config.Account) *Status {
+	st := emptyStatus(acc)
+	if acc.Token == "" {
+		st.Status = "invalid"
+		st.Error = "未配置 Token"
+		return st
+	}
+	c := github.New(acc.Token)
+	user, err := c.User()
+	if err != nil {
+		st.Status = statusFromError(err)
+		st.Error = err.Error()
+		return st
+	}
+	st.User = user
+	st.Status = "active"
+	login := user.Login
+
+	var (
+		mu          sync.Mutex
+		failures    []string
+		reviewTotal int
+		reviewItems []github.IssueItem
+		myTotal     int
+		myItems     []github.IssueItem
+		issueTotal  int
+		issueItems  []github.IssueItem
+		events      []github.Event
+		wg          sync.WaitGroup
+	)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		t, items, err := c.ReviewRequestedPRs(login, 30)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			failures = append(failures, "待处理 PR")
+			return
+		}
+		reviewTotal, reviewItems = t, items
+	}()
+	go func() {
+		defer wg.Done()
+		t, items, err := c.MyOpenPRs(login, 30)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			failures = append(failures, "我的 PR")
+			return
+		}
+		myTotal, myItems = t, items
+	}()
+	go func() {
+		defer wg.Done()
+		t, items, err := c.AssignedIssues(login, 30)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			failures = append(failures, "分配 Issue")
+			return
+		}
+		issueTotal, issueItems = t, items
+	}()
+	go func() {
+		defer wg.Done()
+		v, err := c.ReceivedEvents(login, 30)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			failures = append(failures, "仓库动态")
+			return
+		}
+		events = v
+	}()
+	wg.Wait()
+
+	if len(failures) > 0 {
+		st.Warnings = failures
+	}
+	st.ReviewPRs = nonNil(reviewItems)
+	st.MyPRs = nonNil(myItems)
+	st.AssignedIssues = nonNil(issueItems)
+	st.ReviewPRsCount = reviewTotal
+	st.MyPRsCount = myTotal
+	st.AssignedIssuesCount = issueTotal
+	st.Events = nonNil(events)
+	st.FollowersCount = user.Followers
+	st.FollowingCount = user.Following
+	st.PublicRepos = user.PublicRepos
+
+	// 速率限制（失败不影响主流程）
+	if rl, err := c.RateLimit(); err == nil {
+		st.RateLimit = rl
+	}
+	if len(failures) > 0 {
+		log.Printf("账号 %s 同步汇总部分失败: %v", acc.Username, failures)
 	}
 	return st
 }

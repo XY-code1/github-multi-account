@@ -66,6 +66,27 @@ def test_export_import_roundtrip():
     assert [a["username"] for a in config.load_accounts()] == ["u1", "u2"]
 
 
+def test_export_without_credentials_hides_token():
+    config.add_account("A", "u1", "ghp_hidden", group="g", type_="bot")
+    backup = config.export_backup(include_credentials=False)
+    assert len(backup["accounts"]) == 1
+    assert "token" not in backup["accounts"][0]
+    assert backup["accounts"][0]["username"] == "u1"
+    assert backup["accounts"][0]["type"] == "bot"
+
+
+def test_add_account_keeps_metadata():
+    config.add_account(
+        "A", "u1", "ghp_1", group="工作", type_="bot", alias="U1", note="备注", tags=["核心"]
+    )
+    account = config.load_accounts()[0]
+    assert account["group"] == "工作"
+    assert account["type"] == "bot"
+    assert account["alias"] == "U1"
+    assert account["note"] == "备注"
+    assert account["tags"] == ["核心"]
+
+
 def test_import_is_idempotent_and_skips_invalid():
     backup = {
         "accounts": [

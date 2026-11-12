@@ -27,6 +27,7 @@ import (
 
 	"github-multi-account/internal/config"
 	"github-multi-account/internal/notify"
+	"github-multi-account/internal/ops"
 	"github-multi-account/internal/server"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
@@ -107,6 +108,34 @@ func run(base string) error {
 	srv := server.New(cfg, svc, st, assetsSub)
 	srv.SetBaseDir(base)
 
+	// 运维中心：建表、重建账号元数据镜像、挂接后台同步引擎
+	if err := ops.Init(st.DB()); err != nil {
+		return fmt.Errorf("初始化运维中心数据库失败: %w", err)
+	}
+	accounts, err := cfg.Accounts()
+	if err != nil {
+		return err
+	}
+	metas := make([]ops.Meta, 0, len(accounts))
+	for _, a := range accounts {
+		metas = append(metas, ops.Meta{
+			AccountID: a.ID,
+			Username:  a.Username,
+			Type:      a.Type,
+			Tags:      a.Tags,
+			Note:      a.Note,
+			Alias:     a.Alias,
+			GroupName: a.Group,
+		})
+	}
+	if err := ops.RebuildMeta(st.DB(), metas); err != nil {
+		log.Printf("重建账号元数据失败: %v", err)
+	}
+	engine := ops.NewEngine(st.DB(), cfg, svc, configDir)
+	srv.SetOpsDB(st.DB())
+	srv.SetEngine(engine)
+	srv.SetConfigDir(configDir)
+
 	poller := notify.NewPoller(base, 5*time.Minute, cfg, svc)
 	srv.SetPoller(poller)
 	if len(notify.LoadChannels(base)) > 0 {
@@ -114,6 +143,13 @@ func run(base string) error {
 		log.Printf("外部通知轮询已启动")
 	}
 	defer poller.Stop()
+
+	if len(accounts) > 0 {
+		engine.Start()
+		c := engine.Config()
+		log.Printf("后台同步引擎已启动（间隔 %ds，并发 %d）", c.IntervalSeconds, c.Concurrency)
+	}
+	defer engine.Stop()
 
 	// 已有实例在运行时，只打开浏览器，避免启动第二个服务
 	if p := readSavedPort(dataDir); p > 0 && isAppRunning(p) {

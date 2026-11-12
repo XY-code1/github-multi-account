@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,10 @@ type Account struct {
 	Label    string
 	Username string
 	Group    string
+	Type     string
+	Tags     []string
+	Note     string
+	Alias    string
 	Token    string
 }
 
@@ -33,16 +38,63 @@ func (a Account) MaskedToken() string {
 	return t[:4] + "********" + t[len(t)-4:]
 }
 
+// Normalize 补全类型与标签默认值。
+func (a *Account) Normalize() {
+	if a.Type != "bot" && a.Type != "org" {
+		a.Type = "personal"
+	}
+	if a.Tags == nil {
+		a.Tags = []string{}
+	}
+	if a.Label == "" {
+		a.Label = a.Username
+	}
+}
+
 type rawAccount struct {
-	Label          string `yaml:"label"`
-	Username       string `yaml:"username"`
-	Group          string `yaml:"group"`
-	Token          string `yaml:"token"`
-	TokenEncrypted string `yaml:"token_encrypted"`
+	Label          string   `yaml:"label"`
+	Username       string   `yaml:"username"`
+	Group          string   `yaml:"group"`
+	Type           string   `yaml:"type"`
+	Tags           TagList  `yaml:"tags"`
+	Note           string   `yaml:"note"`
+	Alias          string   `yaml:"alias"`
+	Token          string   `yaml:"token"`
+	TokenEncrypted string   `yaml:"token_encrypted"`
 }
 
 type fileFormat struct {
 	Accounts []rawAccount `yaml:"accounts"`
+}
+
+// TagList 兼容两种写法：YAML 列表或逗号分隔的字符串。
+type TagList []string
+
+// UnmarshalYAML 实现自定义反序列化。
+func (t *TagList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		var s string
+		if err := node.Decode(&s); err == nil {
+			*t = splitTags(s)
+			return nil
+		}
+	}
+	var list []string
+	if err := node.Decode(&list); err != nil {
+		return err
+	}
+	*t = list
+	return nil
+}
+
+func splitTags(s string) []string {
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // Store 是线程安全的账号配置存储。
@@ -151,8 +203,15 @@ func (s *Store) Accounts() ([]Account, error) {
 			Label:    a.Label,
 			Username: a.Username,
 			Group:    a.Group,
+			Type:     a.Type,
+			Tags:     a.Tags,
+			Note:     a.Note,
+			Alias:    a.Alias,
 			Token:    token,
 		})
+	}
+	for i := range accounts {
+		accounts[i].Normalize()
 	}
 
 	if plain {
@@ -182,6 +241,10 @@ func (s *Store) writeLocked(accounts []Account) error {
 			Label:          a.Label,
 			Username:       a.Username,
 			Group:          a.Group,
+			Type:           a.Type,
+			Tags:           TagList(nonNil(a.Tags)),
+			Note:           a.Note,
+			Alias:          a.Alias,
 			TokenEncrypted: enc,
 		})
 	}
@@ -210,23 +273,28 @@ func (s *Store) Save(accounts []Account) error {
 }
 
 // Add 新增或更新（同 username 覆盖）。
-func (s *Store) Add(label, username, token, group string) (Account, error) {
+func (s *Store) Add(in Account) (Account, error) {
 	accounts, err := s.Accounts()
 	if err != nil {
 		return Account{}, err
 	}
+	in.Normalize()
 	for i := range accounts {
-		if username != "" && accounts[i].Username == username {
-			accounts[i].Label = label
-			accounts[i].Token = token
-			accounts[i].Group = group
+		if in.Username != "" && accounts[i].Username == in.Username {
+			accounts[i].Label = in.Label
+			accounts[i].Token = in.Token
+			accounts[i].Group = in.Group
+			accounts[i].Type = in.Type
+			accounts[i].Tags = in.Tags
+			accounts[i].Note = in.Note
+			accounts[i].Alias = in.Alias
 			if err := s.Save(accounts); err != nil {
 				return Account{}, err
 			}
 			return accounts[i], nil
 		}
 	}
-	acc := Account{Label: label, Username: username, Group: group, Token: token}
+	acc := in
 	accounts = append(accounts, acc)
 	for i := range accounts {
 		accounts[i].ID = i + 1
@@ -266,20 +334,30 @@ func (s *Store) Delete(id int) (string, bool, error) {
 	return username, true, nil
 }
 
-// Export 导出备份（password 非空时加密）。
-func (s *Store) Export(password string) (map[string]any, error) {
+// Export 导出备份。
+//
+// includeCredentials 为 false 时只导出账号信息（不含 Token），用于「账号信息备份」；
+// 为 true 时导出完整凭据，password 非空则加密。
+func (s *Store) Export(includeCredentials bool, password string) (map[string]any, error) {
 	accounts, err := s.Accounts()
 	if err != nil {
 		return nil, err
 	}
 	out := make([]map[string]any, 0, len(accounts))
 	for _, a := range accounts {
-		out = append(out, map[string]any{
+		item := map[string]any{
 			"label":    a.Label,
 			"username": a.Username,
 			"group":    a.Group,
-			"token":    a.Token,
-		})
+			"type":     a.Type,
+			"alias":    a.Alias,
+			"note":     a.Note,
+			"tags":     nonNil(a.Tags),
+		}
+		if includeCredentials {
+			item["token"] = a.Token
+		}
+		out = append(out, item)
 	}
 	data := map[string]any{
 		"version":     1,
@@ -331,19 +409,33 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 			label = username
 		}
 		group, _ := m["group"].(string)
+		atype, _ := m["type"].(string)
+		if atype != "bot" && atype != "org" {
+			atype = "personal"
+		}
+		alias, _ := m["alias"].(string)
+		note, _ := m["note"].(string)
+		tags := toTags(m["tags"])
 		found := false
 		for i := range accounts {
 			if accounts[i].Username == username {
 				accounts[i].Label = label
 				accounts[i].Token = token
 				accounts[i].Group = group
+				accounts[i].Type = atype
+				accounts[i].Alias = alias
+				accounts[i].Note = note
+				accounts[i].Tags = tags
 				updated++
 				found = true
 				break
 			}
 		}
 		if !found {
-			accounts = append(accounts, Account{Label: label, Username: username, Group: group, Token: token})
+			accounts = append(accounts, Account{
+				Label: label, Username: username, Group: group, Type: atype,
+				Alias: alias, Note: note, Tags: tags, Token: token,
+			})
 			added++
 		}
 	}
@@ -356,6 +448,33 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 		}
 	}
 	return added, updated, skipped, nil
+}
+
+// toTags 兼容标签的字符串 / 列表两种写法。
+func toTags(v any) []string {
+	switch t := v.(type) {
+	case string:
+		return splitTags(t)
+	case []any:
+		out := []string{}
+		for _, item := range t {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, strings.TrimSpace(s))
+			}
+		}
+		return out
+	case []string:
+		return t
+	default:
+		return []string{}
+	}
+}
+
+func nonNil(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 func clone(in []Account) []Account {

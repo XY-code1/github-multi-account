@@ -54,3 +54,50 @@ def test_missing_account_returns_404(client):
     assert client.get("/api/status/999").status_code == 404
     assert client.post("/api/snapshot/999").status_code == 404
     assert client.delete("/api/accounts/999").status_code == 404
+
+
+def test_create_account_keeps_metadata(client):
+    resp = client.post(
+        "/api/accounts",
+        json={
+            "label": "工作号",
+            "username": "meta-u",
+            "token": "ghp_meta",
+            "group": "工作",
+            "type": "bot",
+            "tags": ["核心", "ci"],
+            "note": "元数据测试",
+            "alias": "M1",
+        },
+    )
+    assert resp.status_code == 200
+
+    listed = client.get("/api/accounts?query=meta-u").json()
+    assert listed["total"] == 1
+    item = listed["items"][0]
+    assert item["type"] == "bot"
+    assert item["group"] == "工作"
+    assert item["tags"] == ["核心", "ci"]
+    assert item["note"] == "元数据测试"
+    assert item["alias"] == "M1"
+    assert "ghp_meta" not in resp.text
+
+
+def test_account_info_export_excludes_credentials(client):
+    config.add_account("A", "export-u", "ghp_secret", group="g", type_="org")
+    resp = client.get("/api/accounts/export")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["accounts"]) == 1
+    assert "token" not in data["accounts"][0]
+    assert data["accounts"][0]["username"] == "export-u"
+    assert data["accounts"][0]["type"] == "org"
+
+
+def test_credential_export_is_encrypted_with_password(client):
+    config.add_account("A", "cred-u", "ghp_secret2")
+    resp = client.post("/api/accounts/export", json={"password": "pw"})
+    assert resp.status_code == 200
+    body = resp.text
+    assert "encrypted" in resp.json()
+    assert "ghp_secret2" not in body

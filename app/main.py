@@ -89,6 +89,10 @@ class AccountIn(BaseModel):
     username: str
     token: str
     group: str = ""
+    type: str = "personal"
+    tags: list[str] = []
+    note: str = ""
+    alias: str = ""
 
 
 class ExportIn(BaseModel):
@@ -104,13 +108,23 @@ async def create_account(payload: AccountIn) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="username 不能为空")
     if not payload.token:
         raise HTTPException(status_code=400, detail="token 不能为空")
-    acc = config.add_account(payload.label, payload.username, payload.token, payload.group or "")
+    acc = config.add_account(
+        payload.label,
+        payload.username,
+        payload.token,
+        payload.group or "",
+        type_=payload.type or "personal",
+        alias=payload.alias or "",
+        note=payload.note or "",
+        tags=payload.tags or [],
+    )
     db.audit("accounts.create", acc["id"], acc["username"], "新增/更新账号")
     return {
         "id": acc["id"],
         "label": acc["label"],
         "username": acc["username"],
         "group": acc.get("group", ""),
+        "type": acc.get("type", "personal"),
         "token_masked": config.mask_token(acc["token"]),
     }
 
@@ -358,8 +372,9 @@ async def test_notification() -> dict[str, Any]:
 
 @app.get("/api/accounts/export")
 async def export_accounts() -> JSONResponse:
-    """导出账号备份（明文，含 Token，请妥善保管）。"""
-    data = config.export_backup()
+    """导出账号信息备份（不含凭据 / Token）。"""
+    data = config.export_backup(include_credentials=False)
+    db.audit("accounts.export", detail="导出账号信息（不含凭据）")
     return JSONResponse(
         data,
         headers={"Content-Disposition": "attachment; filename=github-accounts-backup.json"},
@@ -368,9 +383,10 @@ async def export_accounts() -> JSONResponse:
 
 @app.post("/api/accounts/export")
 async def export_accounts_encrypted(payload: ExportIn) -> JSONResponse:
-    """导出加密备份（password 非空时加密）。"""
-    data = config.export_backup(payload.password or None)
-    filename = "github-accounts-backup-encrypted.json" if payload.password else "github-accounts-backup.json"
+    """导出凭据备份（含 Token，password 非空时加密）。"""
+    data = config.export_backup(payload.password or None, include_credentials=True)
+    db.audit("accounts.export_credentials", detail="导出凭据备份")
+    filename = "github-accounts-backup-encrypted.json" if payload.password else "github-accounts-backup-credentials.json"
     return JSONResponse(
         data,
         headers={"Content-Disposition": f"attachment; filename={filename}"},
@@ -382,9 +398,11 @@ async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
     """从备份导入账号（同 username 覆盖）。支持加密备份。"""
     password = payload.pop("password", "") or None
     try:
-        return config.import_backup(payload, password)
+        result = config.import_backup(payload, password)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    db.audit("accounts.import", detail=f"导入备份：新增 {result['added']}，更新 {result['updated']}，跳过 {result['skipped']}")
+    return result
 
 
 @app.get("/api/history/{account_id}")

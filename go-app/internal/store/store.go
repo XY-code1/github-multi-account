@@ -45,6 +45,8 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite 单写者：串行化连接，避免后台同步与 HTTP 请求并发写时出现锁竞争。
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
@@ -53,6 +55,9 @@ func Open(dir string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// DB 返回底层数据库句柄，供运维中心（ops）复用同一个库。
+func (s *Store) DB() *sql.DB { return s.db }
 
 // Metrics 是一次快照的指标。
 type Metrics struct {

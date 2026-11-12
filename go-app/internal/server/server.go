@@ -2,16 +2,17 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github-multi-account/internal/config"
 	"github-multi-account/internal/notify"
+	"github-multi-account/internal/ops"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
 )
@@ -28,6 +29,9 @@ type Server struct {
 	mux     *http.ServeMux
 	baseDir string
 	poller  *notify.Poller
+	opsDB   *sql.DB
+	engine  *ops.Engine
+	cfgDir  string
 }
 
 // New 创建服务并注册路由。
@@ -84,6 +88,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/notifications/settings", s.handleGetNotificationSettings)
 	s.mux.HandleFunc("POST /api/notifications/settings", s.handleSaveNotificationSettings)
 	s.mux.HandleFunc("POST /api/notifications/test", s.handleTestNotification)
+	// 运维中心
+	s.mux.HandleFunc("GET /api/dashboard/summary", s.handleDashboardSummary)
+	s.mux.HandleFunc("GET /api/dashboard/tasks", s.handleDashboardTasks)
+	s.mux.HandleFunc("GET /api/dashboard/activities", s.handleDashboardActivities)
+	s.mux.HandleFunc("POST /api/accounts/batch-refresh", s.handleBatchRefresh)
+	s.mux.HandleFunc("POST /api/accounts/{id}/sync", s.handleSyncAccount)
+	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
+	s.mux.HandleFunc("POST /api/sync/settings", s.handleSyncSettings)
+	s.mux.HandleFunc("POST /api/sync/run", s.handleSyncRun)
+	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /static/", s.handleStatic)
 }
@@ -96,31 +110,15 @@ func pathID(r *http.Request) (int, bool) {
 	return id, true
 }
 
-func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	accounts, err := s.cfg.Accounts()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
-		return
-	}
-	out := make([]map[string]any, 0, len(accounts))
-	for _, a := range accounts {
-		out = append(out, map[string]any{
-			"id":           a.ID,
-			"label":        a.Label,
-			"username":     a.Username,
-			"group":        a.Group,
-			"token_masked": a.MaskedToken(),
-			"has_token":    a.Token != "",
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
-}
-
 type accountIn struct {
-	Label    string `json:"label"`
-	Username string `json:"username"`
-	Token    string `json:"token"`
-	Group    string `json:"group"`
+	Label    string   `json:"label"`
+	Username string   `json:"username"`
+	Token    string   `json:"token"`
+	Group    string   `json:"group"`
+	Type     string   `json:"type"`
+	Tags     []string `json:"tags"`
+	Note     string   `json:"note"`
+	Alias    string   `json:"alias"`
 }
 
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -137,16 +135,27 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "token 不能为空"})
 		return
 	}
-	acc, err := s.cfg.Add(in.Label, in.Username, in.Token, in.Group)
+	acc, err := s.cfg.Add(config.Account{
+		Label:    in.Label,
+		Username: in.Username,
+		Token:    in.Token,
+		Group:    in.Group,
+		Type:     in.Type,
+		Tags:     in.Tags,
+		Note:     in.Note,
+		Alias:    in.Alias,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
+	ops.Audit(s.opsDB, "accounts.create", &acc.ID, acc.Username, "新增/更新账号")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":           acc.ID,
 		"label":        acc.Label,
 		"username":     acc.Username,
 		"group":        acc.Group,
+		"type":         acc.Type,
 		"token_masked": acc.MaskedToken(),
 	})
 }
@@ -169,6 +178,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	if username != "" && s.store != nil {
 		_, _ = s.store.DeleteHistory(username)
 	}
+	ops.Audit(s.opsDB, "accounts.delete", &id, username, "删除账号")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -259,12 +269,14 @@ func (s *Server) handleVerifyAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "账号不存在"})
 }
 
+// handleExport 导出账号信息备份（不含凭据 / Token）。
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	data, err := s.cfg.Export("")
+	data, err := s.cfg.Export(false, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
+	ops.Audit(s.opsDB, "accounts.export", nil, "", "导出账号信息（不含凭据）")
 	w.Header().Set("Content-Disposition", "attachment; filename=github-accounts-backup.json")
 	writeJSON(w, http.StatusOK, data)
 }
@@ -273,15 +285,17 @@ type exportIn struct {
 	Password string `json:"password"`
 }
 
+// handleExportPost 导出凭据备份（含 Token，password 非空时加密）。
 func (s *Server) handleExportPost(w http.ResponseWriter, r *http.Request) {
 	var in exportIn
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	data, err := s.cfg.Export(in.Password)
+	data, err := s.cfg.Export(true, in.Password)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
-	filename := "github-accounts-backup.json"
+	ops.Audit(s.opsDB, "accounts.export_credentials", nil, "", "导出凭据备份")
+	filename := "github-accounts-backup-credentials.json"
 	if in.Password != "" {
 		filename = "github-accounts-backup-encrypted.json"
 	}
@@ -470,5 +484,3 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	http.StripPrefix("/static/", http.FileServerFS(sub)).ServeHTTP(w, r)
 }
-
-var _ = strings.TrimSpace

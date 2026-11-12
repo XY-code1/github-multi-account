@@ -114,3 +114,24 @@ def test_empty_result(many_accounts):
     r = query_accounts(query="不存在的用户名")
     assert r["total"] == 0
     assert r["items"] == []
+
+
+def test_sync_failed_flagging(many_accounts):
+    """活跃账号连续失败 3 次以上应标记为同步失败。"""
+    db.upsert_sync_state(
+        1, "user1", last_sync_at="2026-01-01T00:00:00+00:00",
+        last_status="active", consecutive_failures=3,
+    )
+    r = query_accounts(status="sync_failed", page_size=5)
+    assert r["total"] == 1
+    assert r["items"][0]["id"] == 1
+
+
+def test_invalid_status_not_overridden_by_failures(many_accounts):
+    """凭据失效的账号即使连续失败也应保持 invalid，而不是 sync_failed。"""
+    db.upsert_sync_state(
+        10, "user10", last_status="invalid", consecutive_failures=5,
+    )
+    r = query_accounts(status="invalid", page_size=50)
+    assert 10 in [i["id"] for i in r["items"]]
+    assert query_accounts(status="sync_failed", page_size=5)["total"] == 0
