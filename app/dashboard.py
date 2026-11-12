@@ -93,8 +93,9 @@ def _task(
     detail: str,
     account_label: str,
     account_id: int,
-    time: str | None,
-    action: str,
+    account_username: str = "",
+    time: str | None = None,
+    action: str = "",
 ) -> dict[str, Any]:
     return {
         "id": f"{type_}:{account_id}",
@@ -105,6 +106,7 @@ def _task(
         "detail": detail,
         "account_id": account_id,
         "account_label": account_label,
+        "account_username": account_username,
         "time": time,
         "action": action,
     }
@@ -129,30 +131,30 @@ def build_tasks() -> list[dict[str, Any]]:
         if status in ("invalid", "error"):
             tasks.append(_task("credential", "high", "凭据无效或已过期",
                                s.get("error") or "登录失败，请检查 Token",
-                               label, aid, synced_at, "重新录入凭据"))
+                               label, aid, acc.get("username", ""), synced_at, "重新录入凭据"))
         if rl and int(rl.get("remaining") or 0) < 100:
             tasks.append(_task("quota", "medium", "API 配额不足",
                                f"剩余 {rl.get('remaining')}/{rl.get('quota_limit')}",
-                               label, aid, rl.get("updated_at"), "查看配额"))
+                               label, aid, acc.get("username", ""), rl.get("updated_at"), "查看配额"))
         if int(s.get("review_prs") or 0) > 0:
             tasks.append(_task("review_pr", "medium", f"{s['review_prs']} 个 PR 等待你 Review",
-                               "有人请求你审查代码", label, aid, synced_at, "去 Review"))
+                               "有人请求你审查代码", label, aid, acc.get("username", ""), synced_at, "去 Review"))
         if int(s.get("my_prs") or 0) > 0:
             tasks.append(_task("my_pr", "low", f"{s['my_prs']} 个我发起的 PR 未关闭",
-                               "关注 CI 与评审进展", label, aid, synced_at, "查看"))
+                               "关注 CI 与评审进展", label, aid, acc.get("username", ""), synced_at, "查看"))
         if int(s.get("assigned_issues") or 0) > 0:
             tasks.append(_task("issue", "medium", f"{s['assigned_issues']} 个 Issue 待处理",
-                               "分配给你的未关闭 Issue", label, aid, synced_at, "去处理"))
+                               "分配给你的未关闭 Issue", label, aid, acc.get("username", ""), synced_at, "去处理"))
         if int(st.get("consecutive_failures") or 0) >= 3:
             tasks.append(_task("sync_failed", "high", "连续多次同步失败",
                                st.get("last_error") or "请检查网络与凭据",
-                               label, aid, st.get("updated_at"), "立即重试"))
+                               label, aid, acc.get("username", ""), st.get("updated_at"), "立即重试"))
         if synced_at:
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(synced_at)).total_seconds()
                 if age > 3600 * 6:
                     tasks.append(_task("sync_stale", "low", "超过 6 小时未同步",
-                                       f"上次同步 {synced_at}", label, aid, synced_at, "立即同步"))
+                                       f"上次同步 {synced_at}", label, aid, acc.get("username", ""), synced_at, "立即同步"))
             except ValueError:
                 pass
 
@@ -161,8 +163,8 @@ def build_tasks() -> list[dict[str, Any]]:
 
 
 def build_activities(limit: int = 100, type_filter: str = "all") -> list[dict[str, Any]]:
-    """跨账号汇总最近动态（来自缓存的 events）。"""
-    out: list[dict[str, Any]] = []
+    """跨账号汇总最近动态（来自缓存的 events），并聚合重复活动。"""
+    collected: list[dict[str, Any]] = []
     for s in db.all_summaries():
         payload = _load_payload(s)
         for ev in payload.get("events", []):
@@ -173,9 +175,10 @@ def build_activities(limit: int = 100, type_filter: str = "all") -> list[dict[st
                 continue
             actor = ev.get("actor") or {}
             repo = ev.get("repo") or {}
-            out.append(
+            collected.append(
                 {
                     "account_id": s["account_id"],
+                    "account_username": s.get("username", ""),
                     "account_label": s.get("label") or s.get("username"),
                     "type": etype,
                     "actor": actor.get("login", ""),
@@ -185,5 +188,21 @@ def build_activities(limit: int = 100, type_filter: str = "all") -> list[dict[st
                     "created_at": ev.get("created_at", ""),
                 }
             )
+
+    # 聚合重复活动：同账号 + 同仓库 + 同类型 + 同动作
+    grouped: dict[tuple, dict[str, Any]] = {}
+    order: list[tuple] = []
+    for item in collected:
+        key = (item["account_id"], item["repo"], item["type"], item["action"])
+        if key not in grouped:
+            grouped[key] = dict(item, count=1)
+            order.append(key)
+            continue
+        g = grouped[key]
+        g["count"] += 1
+        if (item.get("created_at") or "") > (g.get("created_at") or ""):
+            g["created_at"] = item["created_at"]
+
+    out = [grouped[k] for k in order]
     out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return out[:limit]

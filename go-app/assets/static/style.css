@@ -98,6 +98,147 @@ a:hover { text-decoration: underline; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .last-refresh { font-size: 12px; color: var(--text-faint); margin-right: 4px; }
 
+/* ---------------- 全局搜索框 ---------------- */
+
+.global-search {
+  position: relative;
+  flex: 1 1 320px;
+  max-width: 620px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+.global-search:focus-within { border-color: var(--accent); background: var(--bg); }
+.global-search-icon { color: var(--text-faint); display: inline-flex; }
+.global-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  outline: none;
+}
+.global-search select { flex: none; }
+.global-search-kbd {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--bg);
+}
+.search-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+.search-dropdown.hidden { display: none; }
+.search-dropdown-hint {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.search-dropdown-list { display: flex; flex-direction: column; gap: 2px; }
+.search-item { display: block; padding: 8px 10px; border-radius: var(--radius-sm); text-decoration: none; }
+.search-item:hover { background: var(--bg-subtle); }
+.search-item-title {
+  font-size: 13px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-item-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+
+/* ---------------- 总览统计卡（合并版） ---------------- */
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.summary-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.summary-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+.summary-main { display: flex; align-items: baseline; gap: 6px; }
+.summary-num { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.summary-num.is-danger { color: var(--danger); }
+.summary-sub { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* ---------------- 更多操作菜单 ---------------- */
+
+.menu-wrap { position: relative; }
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 190px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.menu.hidden { display: none; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item:hover { background: var(--bg-subtle); }
+.menu-toggle { justify-content: flex-start; cursor: pointer; }
+.menu-toggle input { margin: 0; }
+.menu-sep { height: 1px; margin: 6px 4px; background: var(--border-muted); }
+.menu-version { justify-content: space-between; }
+
+/* ---------------- 标签补充 ---------------- */
+
+.tag-account { background: var(--accent-soft); color: var(--accent); }
+.tag.is-count { background: var(--bg-hover); color: var(--text); font-weight: 600; }
+.tag.is-success { background: var(--success-soft); color: var(--success); }
+.tag.is-danger { background: var(--danger-soft); color: var(--danger); }
+.tag.is-warning { background: var(--warning-soft); color: var(--warning); }
+
 /* ---------------- 按钮 ---------------- */
 
 .btn {

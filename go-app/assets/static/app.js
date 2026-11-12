@@ -108,6 +108,7 @@ const state = {
   metric: "followers",
   notifications: false,
   prefetchEnabled: false,
+  version: null,
   collapsedGroups: new Set(),
   lastRefresh: null,
 };
@@ -162,18 +163,31 @@ async function loadOverview() {
 }
 
 function renderSummary(s) {
-  const cards = [
-    { num: s.total, label: "账号总数", cls: "is-accent" },
-    { num: s.healthy, label: "健康账号", cls: "is-success" },
-    { num: s.attention, label: "需要关注", cls: s.attention ? "is-danger" : "" },
-    { num: s.credential_risk, label: "凭据风险", cls: s.credential_risk ? "is-danger" : "" },
-    { num: s.quota_low, label: "配额不足", cls: s.quota_low ? "is-warning" : "" },
-    { num: s.review_prs, label: "待 Review PR", cls: "" },
-    { num: s.issues, label: "待处理 Issue", cls: "" },
-  ];
-  document.getElementById("summaryCards").innerHTML = cards
-    .map((c) => `<div class="stat-card ${c.cls}"><span class="stat-num">${c.num}</span><span class="stat-label">${c.label}</span></div>`)
-    .join("");
+  const todos = (s.review_prs || 0) + (s.issues || 0);
+  document.getElementById("summaryCards").innerHTML = `
+    <div class="summary-card">
+      <div class="summary-title">账号</div>
+      <div class="summary-main"><span class="summary-num">${s.total}</span></div>
+      <div class="summary-sub">
+        <span class="tag is-success">健康 ${s.healthy}</span>
+        <span class="tag ${s.attention ? "is-danger" : ""}">需关注 ${s.attention}</span>
+      </div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-title">风险</div>
+      <div class="summary-main"><span class="summary-num ${s.credential_risk ? "is-danger" : ""}">${s.credential_risk}</span></div>
+      <div class="summary-sub">
+        <span class="tag ${s.quota_low ? "is-warning" : ""}">配额不足 ${s.quota_low}</span>
+      </div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-title">待办</div>
+      <div class="summary-main"><span class="summary-num">${todos}</span></div>
+      <div class="summary-sub">
+        <span class="tag">待 Review ${s.review_prs}</span>
+        <span class="tag">Issue ${s.issues}</span>
+      </div>
+    </div>`;
   document.getElementById("lastRefresh").textContent = s.last_sync_at
     ? "最近同步 " + relTime(s.last_sync_at)
     : "尚未同步";
@@ -199,6 +213,9 @@ function taskHtml(t) {
     credential: "🔑", quota: "📊", review_pr: "👀", my_pr: "📤",
     issue: "📋", sync_failed: "⚠", sync_stale: "🕘",
   }[t.type] || "•";
+  const accountTag = t.account_username
+    ? `${escapeHtml(t.account_label)} · @${escapeHtml(t.account_username)}`
+    : escapeHtml(t.account_label);
   return `
     <div class="task" data-priority="${t.priority}">
       <div class="task-icon">${icon}</div>
@@ -206,7 +223,7 @@ function taskHtml(t) {
         <div class="task-title">${escapeHtml(t.title)}</div>
         <div class="task-meta">
           <span class="tag">${escapeHtml(t.type_label || t.type)}</span>
-          <span class="tag">${escapeHtml(t.account_label)}</span>
+          <span class="tag tag-account">${accountTag}</span>
           <span>${escapeHtml(t.detail)}</span>
           ${t.time ? `<span>${relTime(t.time)}</span>` : ""}
         </div>
@@ -232,12 +249,21 @@ async function loadOverviewActivities(type) {
 }
 
 function activityHtml(a) {
+  const ev = EVENT_TYPES[a.type] || { text: a.type };
+  const act = ACTION_TYPES[a.action] || a.action;
+  const count = a.count > 1 ? `<span class="tag is-count">×${a.count}</span>` : "";
+  const account = a.account_username
+    ? `${escapeHtml(a.account_label || "")} · @${escapeHtml(a.account_username)}`
+    : escapeHtml(a.account_label);
   return `
     <div class="activity">
       ${a.actor_avatar ? `<img class="activity-actor" src="${escapeHtml(a.actor_avatar)}" alt="" onerror="handleImgError(this)">` : ""}
       <div class="activity-body">
-        <div><strong>${escapeHtml(a.actor || a.account_label)}</strong> ${escapeHtml(a.type)}${a.action ? " · " + escapeHtml(a.action) : ""}</div>
-        <div class="task-meta"><span class="tag">${escapeHtml(a.account_label)}</span>${a.repo ? `<span class="tag">${escapeHtml(a.repo)}</span>` : ""}</div>
+        <div><strong>${escapeHtml(a.actor || a.account_label)}</strong> ${escapeHtml(ev.text)}${act ? " · " + escapeHtml(act) : ""} ${count}</div>
+        <div class="task-meta">
+          <span class="tag tag-account">${account}</span>
+          ${a.repo ? `<span class="tag">${escapeHtml(a.repo)}</span>` : ""}
+        </div>
       </div>
       <span class="activity-time">${relTime(a.created_at)}</span>
     </div>`;
@@ -705,17 +731,27 @@ const EVENT_TYPES = {
   IssueCommentEvent: { text: "评论了 Issue" }, CommitCommentEvent: { text: "评论了提交" },
 };
 
+// GitHub 事件 payload.action 的中文说法
+const ACTION_TYPES = {
+  opened: "开启", closed: "关闭", created: "创建", edited: "编辑", deleted: "删除",
+  merged: "合并", pushed: "推送", labeled: "加标签", unlabeled: "移除标签",
+  assigned: "分配", unassigned: "取消分配", reopened: "重新开启", synchronized: "同步",
+  published: "发布", forked: "Fork", starred: "Star", completed: "完成",
+  started: "开始", reviewed: "评审", dismissed: "驳回", added: "添加", removed: "移除",
+};
+
 function eventList(events) {
   if (!events.length) return `<div class="empty-tab">最近没有动态</div>`;
   return `<div class="item-list">${events.map((ev) => {
     const t = EVENT_TYPES[ev.type] || { text: ev.type };
+    const act = ACTION_TYPES[ev.payload?.action] || ev.payload?.action;
     const actor = ev.actor || {};
     const repo = ev.repo || {};
     return `
     <div class="item">
       ${actor.avatar_url ? `<img class="activity-actor" src="${escapeHtml(actor.avatar_url)}" alt="" onerror="handleImgError(this)">` : ""}
       <div class="item-body">
-        <div class="item-title" style="font-weight:500">${escapeHtml(actor.login || "")} ${escapeHtml(t.text)}${ev.payload?.action ? " · " + escapeHtml(ev.payload.action) : ""}</div>
+        <div class="item-title" style="font-weight:500">${escapeHtml(actor.login || "")} ${escapeHtml(t.text)}${act ? " · " + escapeHtml(act) : ""}</div>
         <div class="item-meta"><span class="tag">${escapeHtml(repo.name || "")}</span></div>
       </div>
       <span class="item-time">${relTime(ev.created_at)}</span>
@@ -839,13 +875,22 @@ let prefetchInFlight = false;
 const PREFETCH_LIMIT = 10;
 const PREFETCH_CONCURRENCY = 2;
 
-function togglePrefetch() {
-  state.prefetchEnabled = !state.prefetchEnabled;
-  const btn = document.getElementById("prefetchBtn");
-  btn.classList.toggle("active", state.prefetchEnabled);
-  btn.textContent = state.prefetchEnabled ? "预取·开" : "预取·关";
-  showToast(state.prefetchEnabled ? "已开启详情预取（会消耗 GitHub 配额）" : "已关闭详情预取");
-  if (state.prefetchEnabled) runPrefetch();
+function setPrefetch(on) {
+  state.prefetchEnabled = on;
+  const cb = document.getElementById("menuPrefetch");
+  if (cb) cb.checked = on;
+  showToast(on ? "已开启详情预取（会消耗 GitHub 配额）" : "已关闭详情预取");
+  if (on) runPrefetch();
+}
+
+// ---------------- 更多操作菜单 ----------------
+
+function openMoreMenu() {
+  document.getElementById("moreMenu").classList.toggle("hidden");
+}
+
+function closeMoreMenu() {
+  document.getElementById("moreMenu").classList.add("hidden");
 }
 
 // 限量预取当前列表前若干个账号的详情，写入缓存供详情页秒开。
@@ -876,9 +921,8 @@ async function runPrefetch() {
 async function loadVersion() {
   try {
     const v = await api("/api/version");
-    const btn = document.getElementById("versionBtn");
-    btn.textContent = "v" + v.version;
-    btn.style.display = "";
+    state.version = v.version;
+    document.getElementById("versionText").textContent = "v" + v.version;
   } catch (e) { /* ignore */ }
 }
 
@@ -886,8 +930,7 @@ async function checkUpdate() {
   try {
     const r = await api("/api/update-check");
     if (!r.ok) { showToast(r.error || "无法检查更新"); return; }
-    const cur = (document.getElementById("versionBtn").textContent || "").replace(/^v/, "");
-    if (r.latest && r.latest !== cur) showToast(`有新版本 ${r.latest}`);
+    if (r.latest && r.latest !== state.version) showToast(`有新版本 ${r.latest}`);
     else showToast("已是最新版本");
   } catch (e) { showToast("检查更新失败"); }
 }
@@ -1010,45 +1053,49 @@ async function importBackup(file) {
 
 // ---------------- 全局搜索 ----------------
 
-function openSearchModal() {
-  document.getElementById("searchModal").classList.remove("hidden");
+function focusGlobalSearch() {
   const input = document.getElementById("globalSearchInput");
-  input.value = "";
-  document.getElementById("globalSearchResults").innerHTML =
-    `<div class="empty-tab">输入关键字，搜索所有账号的 PR / Issue</div>`;
-  setTimeout(() => input.focus(), 0);
+  if (!input) return;
+  input.focus();
+  input.select();
+  if (input.value.trim()) doGlobalSearch();
 }
 
-function closeSearchModal() {
-  document.getElementById("searchModal").classList.add("hidden");
+function closeGlobalSearch() {
+  const box = document.getElementById("globalSearchResults");
+  if (box) box.classList.add("hidden");
 }
 
 async function doGlobalSearch() {
   const q = document.getElementById("globalSearchInput").value.trim();
   const kind = document.getElementById("globalSearchKind").value;
   const box = document.getElementById("globalSearchResults");
-  if (!q) { box.innerHTML = `<div class="empty-tab">输入关键字开始搜索</div>`; return; }
-  box.innerHTML = `<div class="empty-tab">搜索中…</div>`;
+  if (!q) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="search-dropdown-hint">搜索中…</div>`;
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(q)}&kind=${encodeURIComponent(kind)}`);
     const results = data.results || [];
-    box.innerHTML = results.length
-      ? `<div class="item-list">${results.map((r) => `
-          <div class="item">
-            <div class="item-body">
-              <a class="item-title" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>
-              <div class="item-meta">
-                <span class="tag">${escapeHtml(r.repository)}</span>
-                <span class="tag">${escapeHtml(r.account_label)}</span>
-                ${(r.labels || []).map((l) => `<span class="tag">${escapeHtml(l)}</span>`).join("")}
-              </div>
-            </div>
-            <span class="item-time">${relTime(r.created_at)}</span>
-          </div>`).join("")}</div>
-        <div style="margin-top:10px;font-size:12px;color:var(--text-faint)">共 ${data.total} 条，搜索了 ${data.accounts} 个账号</div>`
-      : `<div class="empty-tab">没有匹配的结果</div>`;
+    if (!results.length) {
+      box.innerHTML = `<div class="search-dropdown-hint">没有匹配的结果</div>`;
+      return;
+    }
+    box.innerHTML = `<div class="search-dropdown-list">${results.slice(0, 12).map((r) => `
+      <a class="search-item" href="${safeUrl(r.html_url)}" target="_blank" rel="noopener">
+        <div class="search-item-title">${escapeHtml(r.title)}</div>
+        <div class="search-item-meta">
+          <span class="tag">${escapeHtml(r.repository)}</span>
+          <span class="tag tag-account">${escapeHtml(r.account_label)}</span>
+          ${(r.labels || []).slice(0, 3).map((l) => `<span class="tag">${escapeHtml(l)}</span>`).join("")}
+        </div>
+      </a>`).join("")}</div>
+      <div class="search-dropdown-hint">共 ${data.total} 条，搜索了 ${data.accounts} 个账号${results.length < data.total ? `（显示前 ${results.length} 条）` : ""}</div>`;
   } catch (e) {
-    box.innerHTML = `<div class="empty-tab">搜索失败：${escapeHtml(e.message)}</div>`;
+    box.innerHTML = `<div class="search-dropdown-hint">搜索失败：${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -1184,35 +1231,53 @@ function toggleCheckAll() {
 
 function onKeydown(e) {
   if (e.key === "Escape") {
-    ["modal", "backupModal", "searchModal", "notifyModal", "syncModal", "shortcutsModal"].forEach((id) => {
+    ["modal", "backupModal", "notifyModal", "syncModal", "shortcutsModal"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.classList.add("hidden");
     });
+    closeGlobalSearch();
+    closeMoreMenu();
     return;
   }
   const typing = document.activeElement && ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
   if (typing) return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openSearchModal(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); focusGlobalSearch(); return; }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (k === "t") toggleTheme();
   if (k === "r") syncNow();
   if (k === "a") openModal();
-  if (k === "/") { e.preventDefault(); openSearchModal(); }
+  if (k === "/") { e.preventDefault(); focusGlobalSearch(); }
 }
 
 // ---------------- 事件绑定 ----------------
 
 function bindEvents() {
   document.querySelectorAll(".nav-item").forEach((n) => n.addEventListener("click", () => go(n.dataset.page)));
-  document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);
   document.getElementById("syncNowBtn").addEventListener("click", syncNow);
-  document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
-  document.getElementById("prefetchBtn").addEventListener("click", togglePrefetch);
-  document.getElementById("notifyBtn").addEventListener("click", openNotifyModal);
   document.getElementById("themeBtn").addEventListener("click", toggleTheme);
   document.getElementById("addBtn").addEventListener("click", openModal);
-  document.getElementById("versionBtn").addEventListener("click", checkUpdate);
+
+  // 全局搜索框
+  document.getElementById("globalSearchInput").addEventListener("input", debounce(doGlobalSearch, 300));
+  document.getElementById("globalSearchInput").addEventListener("focus", () => {
+    if (document.getElementById("globalSearchInput").value.trim()) doGlobalSearch();
+  });
+  document.getElementById("globalSearchInput").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeGlobalSearch(); document.getElementById("globalSearchInput").blur(); }
+  });
+  document.getElementById("globalSearchKind").addEventListener("change", doGlobalSearch);
+
+  // 更多操作菜单
+  document.getElementById("moreBtn").addEventListener("click", (e) => { e.stopPropagation(); openMoreMenu(); });
+  document.getElementById("menuSyncSettings").addEventListener("click", () => { closeMoreMenu(); openSyncModal(); });
+  document.getElementById("menuNotify").addEventListener("click", () => { closeMoreMenu(); openNotifyModal(); });
+  document.getElementById("menuPrefetch").addEventListener("change", (e) => { closeMoreMenu(); setPrefetch(e.target.checked); });
+  document.getElementById("menuCheckUpdate").addEventListener("click", () => { closeMoreMenu(); checkUpdate(); });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#globalSearchWrap")) closeGlobalSearch();
+    if (!e.target.closest(".menu-wrap")) closeMoreMenu();
+  });
 
   document.getElementById("cancelBtn").addEventListener("click", closeModal);
   document.getElementById("saveBtn").addEventListener("click", saveAccount);
@@ -1224,13 +1289,6 @@ function bindEvents() {
   document.getElementById("importFile").addEventListener("change", (e) => { if (e.target.files[0]) importBackup(e.target.files[0]); });
   document.getElementById("backupCloseBtn").addEventListener("click", closeBackupModal);
   document.getElementById("backupModal").addEventListener("click", (e) => { if (e.target.id === "backupModal") closeBackupModal(); });
-
-  document.getElementById("searchCloseBtn").addEventListener("click", closeSearchModal);
-  document.getElementById("searchModal").addEventListener("click", (e) => { if (e.target.id === "searchModal") closeSearchModal(); });
-  document.getElementById("globalSearchInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doGlobalSearch(); });
-  document.getElementById("globalSearchKind").addEventListener("change", () => {
-    if (document.getElementById("globalSearchInput").value.trim()) doGlobalSearch();
-  });
 
   document.getElementById("notifyCloseBtn").addEventListener("click", closeNotifyModal);
   document.getElementById("notifyModal").addEventListener("click", (e) => { if (e.target.id === "notifyModal") closeNotifyModal(); });

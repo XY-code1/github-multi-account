@@ -83,6 +83,46 @@ def test_activities_aggregate(populated):
     assert acts[0]["account_label"] == "好号A"
 
 
+def test_task_includes_account_username(populated):
+    """待办要带上具体账号身份，便于区分同名的不同账号。"""
+    tasks = dashboard.build_tasks()
+    cred = next(t for t in tasks if t["type"] == "credential")
+    assert cred["account_username"] == "bad"
+    review = next(t for t in tasks if t["type"] == "review_pr")
+    assert review["account_username"] == "good1"
+
+
+def test_activities_aggregate_duplicates(populated):
+    """同一账号 + 同一仓库 + 同类型 + 同动作的重复活动应聚合并计数。"""
+    events = [
+        {
+            "type": "PushEvent", "actor": {"login": "u", "avatar_url": ""},
+            "repo": {"name": "o/r"}, "payload": {"action": "pushed"},
+            "created_at": "2026-01-02T00:00:00Z",
+        }
+        for _ in range(3)
+    ]
+    db.upsert_summary(2, "good1", {"status": "active", "label": "好号A", "events": events})
+    acts = dashboard.build_activities(limit=10)
+    assert len(acts) == 1
+    assert acts[0]["count"] == 3
+    assert acts[0]["account_username"] == "good1"
+
+
+def test_activities_keep_different_actions(populated):
+    """动作不同不算重复，应各自保留。"""
+    events = [
+        {"type": "IssuesEvent", "actor": {"login": "u", "avatar_url": ""},
+         "repo": {"name": "o/r"}, "payload": {"action": a},
+         "created_at": "2026-01-02T00:00:00Z"}
+        for a in ("opened", "closed")
+    ]
+    db.upsert_summary(2, "good1", {"status": "active", "label": "好号A", "events": events})
+    acts = dashboard.build_activities(limit=10)
+    assert len(acts) == 2
+    assert all(a["count"] == 1 for a in acts)
+
+
 def test_partial_failure_isolation(populated, monkeypatch):
     """单个账号失败不影响其他账号。"""
     import asyncio

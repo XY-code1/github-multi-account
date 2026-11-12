@@ -31,28 +31,31 @@ type Summary struct {
 
 // Task 是一条统一待办。
 type Task struct {
-	ID            string `json:"id"`
-	Type          string `json:"type"`
-	TypeLabel     string `json:"type_label"`
-	Priority      string `json:"priority"`
-	Title         string `json:"title"`
-	Detail        string `json:"detail"`
-	AccountID     int    `json:"account_id"`
-	AccountLabel  string `json:"account_label"`
-	Time          string `json:"time"`
-	Action        string `json:"action"`
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	TypeLabel       string `json:"type_label"`
+	Priority        string `json:"priority"`
+	Title           string `json:"title"`
+	Detail          string `json:"detail"`
+	AccountID       int    `json:"account_id"`
+	AccountLabel    string `json:"account_label"`
+	AccountUsername string `json:"account_username"`
+	Time            string `json:"time"`
+	Action          string `json:"action"`
 }
 
-// Activity 是一条跨账号动态。
+// Activity 是一条跨账号动态（重复活动已聚合，Count 表示同类条数）。
 type Activity struct {
-	AccountID    int    `json:"account_id"`
-	AccountLabel string `json:"account_label"`
-	Type         string `json:"type"`
-	Actor        string `json:"actor"`
-	ActorAvatar  string `json:"actor_avatar"`
-	Repo         string `json:"repo"`
-	Action       string `json:"action"`
-	CreatedAt    string `json:"created_at"`
+	AccountID       int    `json:"account_id"`
+	AccountUsername string `json:"account_username"`
+	AccountLabel    string `json:"account_label"`
+	Type            string `json:"type"`
+	Actor           string `json:"actor"`
+	ActorAvatar     string `json:"actor_avatar"`
+	Repo            string `json:"repo"`
+	Action          string `json:"action"`
+	Count           int    `json:"count"`
+	CreatedAt       string `json:"created_at"`
 }
 
 var taskTypeLabels = map[string]string{
@@ -166,36 +169,36 @@ func BuildTasks(db *sql.DB, accounts []config.Account) ([]Task, error) {
 
 		if s.Status == "invalid" || s.Status == "error" {
 			tasks = append(tasks, newTask("credential", "high", "凭据无效或已过期",
-				orString(s.Error, "登录失败，请检查 Token"), label, s.AccountID, syncedAt, "重新录入凭据"))
+				orString(s.Error, "登录失败，请检查 Token"), label, s.AccountID, acc.Username, syncedAt, "重新录入凭据"))
 		}
 		if hasRL && rl.Remaining < quotaLowThreshold {
 			tasks = append(tasks, newTask("quota", "medium", "API 配额不足",
-				itoa(rl.Remaining)+"/"+itoa(rl.QuotaLimit), label, s.AccountID, rl.UpdatedAt, "查看配额"))
+				itoa(rl.Remaining)+"/"+itoa(rl.QuotaLimit), label, s.AccountID, acc.Username, rl.UpdatedAt, "查看配额"))
 		}
 		if s.ReviewPRs > 0 {
 			tasks = append(tasks, newTask("review_pr", "medium",
 				itoa(s.ReviewPRs)+" 个 PR 等待你 Review", "有人请求你审查代码",
-				label, s.AccountID, syncedAt, "去 Review"))
+				label, s.AccountID, acc.Username, syncedAt, "去 Review"))
 		}
 		if s.MyPRs > 0 {
 			tasks = append(tasks, newTask("my_pr", "low",
 				itoa(s.MyPRs)+" 个我发起的 PR 未关闭", "关注 CI 与评审进展",
-				label, s.AccountID, syncedAt, "查看"))
+				label, s.AccountID, acc.Username, syncedAt, "查看"))
 		}
 		if s.AssignedIssues > 0 {
 			tasks = append(tasks, newTask("issue", "medium",
 				itoa(s.AssignedIssues)+" 个 Issue 待处理", "分配给你的未关闭 Issue",
-				label, s.AccountID, syncedAt, "去处理"))
+				label, s.AccountID, acc.Username, syncedAt, "去处理"))
 		}
 		if st.ConsecutiveFailures >= 3 {
 			tasks = append(tasks, newTask("sync_failed", "high", "连续多次同步失败",
-				orString(st.LastError, "请检查网络与凭据"), label, s.AccountID, st.UpdatedAt, "立即重试"))
+				orString(st.LastError, "请检查网络与凭据"), label, s.AccountID, acc.Username, st.UpdatedAt, "立即重试"))
 		}
 		if syncedAt != "" {
 			if t, err := time.Parse(time.RFC3339, syncedAt); err == nil {
 				if time.Since(t) > staleAfter {
 					tasks = append(tasks, newTask("sync_stale", "low", "超过 6 小时未同步",
-						"上次同步 "+syncedAt, label, s.AccountID, syncedAt, "立即同步"))
+						"上次同步 "+syncedAt, label, s.AccountID, acc.Username, syncedAt, "立即同步"))
 				}
 			}
 		}
@@ -212,13 +215,13 @@ func BuildTasks(db *sql.DB, accounts []config.Account) ([]Task, error) {
 	return tasks, nil
 }
 
-// BuildActivities 跨账号汇总最近动态（来自缓存的 events）。
+// BuildActivities 跨账号汇总最近动态（来自缓存的 events），并聚合重复活动。
 func BuildActivities(db *sql.DB, limit int, typeFilter string) ([]Activity, error) {
 	summaries, err := AllSummaries(db)
 	if err != nil {
 		return nil, err
 	}
-	out := []Activity{}
+	collected := []Activity{}
 	for _, s := range summaries {
 		var payload struct {
 			Events []struct {
@@ -252,17 +255,40 @@ func BuildActivities(db *sql.DB, limit int, typeFilter string) ([]Activity, erro
 				continue
 			}
 			action, _ := ev.Payload["action"].(string)
-			out = append(out, Activity{
-				AccountID:    s.AccountID,
-				AccountLabel: label,
-				Type:         ev.Type,
-				Actor:        ev.Actor.Login,
-				ActorAvatar:  ev.Actor.AvatarURL,
-				Repo:         ev.Repo.Name,
-				Action:       action,
-				CreatedAt:    ev.CreatedAt,
+			collected = append(collected, Activity{
+				AccountID:       s.AccountID,
+				AccountUsername: s.Username,
+				AccountLabel:    label,
+				Type:            ev.Type,
+				Actor:           ev.Actor.Login,
+				ActorAvatar:     ev.Actor.AvatarURL,
+				Repo:            ev.Repo.Name,
+				Action:          action,
+				CreatedAt:       ev.CreatedAt,
 			})
 		}
+	}
+
+	// 聚合重复活动：同账号 + 同仓库 + 同类型 + 同动作
+	grouped := map[activityKey]*Activity{}
+	order := []activityKey{}
+	for _, a := range collected {
+		key := activityKey{accountID: a.AccountID, repo: a.Repo, typ: a.Type, action: a.Action}
+		if cur, ok := grouped[key]; ok {
+			cur.Count++
+			if a.CreatedAt > cur.CreatedAt {
+				cur.CreatedAt = a.CreatedAt
+			}
+			continue
+		}
+		item := a
+		item.Count = 1
+		grouped[key] = &item
+		order = append(order, key)
+	}
+	out := make([]Activity, 0, len(order))
+	for _, k := range order {
+		out = append(out, *grouped[k])
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	if len(out) > limit {
@@ -271,18 +297,26 @@ func BuildActivities(db *sql.DB, limit int, typeFilter string) ([]Activity, erro
 	return out, nil
 }
 
-func newTask(type_, priority, title, detail, label string, accountID int, t, action string) Task {
+type activityKey struct {
+	accountID int
+	repo      string
+	typ       string
+	action    string
+}
+
+func newTask(type_, priority, title, detail, label string, accountID int, username, t, action string) Task {
 	return Task{
-		ID:           type_ + ":" + itoa(accountID),
-		Type:         type_,
-		TypeLabel:    taskTypeLabels[type_],
-		Priority:     priority,
-		Title:        title,
-		Detail:       detail,
-		AccountID:    accountID,
-		AccountLabel: label,
-		Time:         t,
-		Action:       action,
+		ID:              type_ + ":" + itoa(accountID),
+		Type:            type_,
+		TypeLabel:       taskTypeLabels[type_],
+		Priority:        priority,
+		Title:           title,
+		Detail:          detail,
+		AccountID:       accountID,
+		AccountLabel:    label,
+		AccountUsername: username,
+		Time:            t,
+		Action:          action,
 	}
 }
 

@@ -31,15 +31,39 @@
         <p id="subtitle">账号总览</p>
       </div>
     </div>
+    <div class="global-search" id="globalSearchWrap">
+      <span class="global-search-icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04ZM11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Z"></path></svg>
+      </span>
+      <input id="globalSearchInput" type="text" placeholder="搜索所有账号的 PR / Issue…" autocomplete="off" spellcheck="false">
+      <select id="globalSearchKind" class="select-sm" title="搜索范围">
+        <option value="all">全部</option>
+        <option value="pr">仅 PR</option>
+        <option value="issue">仅 Issue</option>
+      </select>
+      <kbd class="global-search-kbd">Ctrl K</kbd>
+      <div id="globalSearchResults" class="search-dropdown hidden"></div>
+    </div>
     <div class="topbar-actions">
       <span id="lastRefresh" class="last-refresh"></span>
-      <button id="globalSearchBtn" class="btn" title="全局搜索（Ctrl+K）">搜索</button>
       <button id="syncNowBtn" class="btn" title="立即同步全部账号">同步</button>
-      <button id="syncSettingsBtn" class="btn" title="同步设置（并发 / 间隔 / 退避）">设置</button>
-      <button id="prefetchBtn" class="btn" title="后台预取详情（会消耗 GitHub 配额）">预取·关</button>
-      <button id="notifyBtn" class="btn" title="外部通知设置">通知</button>
-      <button id="versionBtn" class="btn" title="当前版本，点击检查更新" style="display:none"></button>
       <button id="themeBtn" class="btn" title="切换主题（T）">◐</button>
+      <div class="menu-wrap">
+        <button id="moreBtn" class="btn" title="更多操作">⋯</button>
+        <div id="moreMenu" class="menu hidden">
+          <button class="menu-item" id="menuSyncSettings">同步设置</button>
+          <label class="menu-item menu-toggle">
+            <input type="checkbox" id="menuPrefetch">
+            <span>详情预取</span>
+          </label>
+          <button class="menu-item" id="menuNotify">外部通知</button>
+          <div class="menu-sep"></div>
+          <div class="menu-item menu-version">
+            <span id="versionText">v—</span>
+            <button id="menuCheckUpdate" class="btn btn-sm">检查更新</button>
+          </div>
+        </div>
+      </div>
       <button id="addBtn" class="btn btn-primary">
         <span class="btn-icon">＋</span> 添加账号
       </button>
@@ -63,7 +87,7 @@
           <h2>账号总览</h2>
           <p class="page-desc">所有账号的全局状态与待办聚合</p>
         </div>
-        <div id="summaryCards" class="stat-grid"></div>
+        <div id="summaryCards" class="summary-grid"></div>
         <div class="panel">
           <div class="panel-head">
             <h3>今日需要处理</h3>
@@ -286,26 +310,6 @@
       <div class="modal-actions">
         <span class="spacer"></span>
         <button id="backupCloseBtn" class="btn">关闭</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 弹窗：全局搜索 -->
-  <div id="searchModal" class="modal-overlay hidden">
-    <div class="modal modal-lg">
-      <h3>全局搜索</h3>
-      <div class="search-bar">
-        <input id="globalSearchInput" type="text" placeholder="搜索所有账号的 PR / Issue 标题…" autocomplete="off">
-        <select id="globalSearchKind" class="select-sm">
-          <option value="all">全部</option>
-          <option value="pr">仅 PR</option>
-          <option value="issue">仅 Issue</option>
-        </select>
-      </div>
-      <div id="globalSearchResults" class="search-results"></div>
-      <div class="modal-actions">
-        <span class="spacer"></span>
-        <button id="searchCloseBtn" class="btn">关闭（Esc）</button>
       </div>
     </div>
   </div>

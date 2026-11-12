@@ -2,6 +2,7 @@ package ops
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -309,6 +310,48 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 	if loaded := LoadSettings(dir); loaded.IntervalSeconds != 600 {
 		t.Fatalf("同步设置丢失: %+v", loaded)
+	}
+}
+
+func TestBuildActivitiesAggregates(t *testing.T) {
+	cfg, cleanup := newTestEnv(t)
+	defer cleanup()
+	addAccounts(t, cfg, 1)
+	db := DB()
+
+	event := map[string]any{
+		"type": "PushEvent",
+		"actor": map[string]any{
+			"login":      "u",
+			"avatar_url": "",
+		},
+		"repo":       map[string]any{"name": "o/r"},
+		"payload":    map[string]any{"action": "pushed"},
+		"created_at": "2026-01-02T00:00:00Z",
+	}
+	payload, err := json.Marshal(map[string]any{
+		"events": []any{event, event, event},
+	})
+	if err != nil {
+		t.Fatalf("构造 payload 失败: %v", err)
+	}
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 1, Username: "user1", Status: "active", Label: "账号1",
+		Payload: payload, SyncedAt: "2026-01-02T00:00:00Z",
+	})
+
+	acts, err := BuildActivities(db, 10, "all")
+	if err != nil {
+		t.Fatalf("汇总动态失败: %v", err)
+	}
+	if len(acts) != 1 {
+		t.Fatalf("重复活动应聚合成 1 条: %+v", acts)
+	}
+	if acts[0].Count != 3 {
+		t.Fatalf("count 应为 3: %+v", acts[0])
+	}
+	if acts[0].AccountUsername != "user1" {
+		t.Fatalf("缺少账号身份: %+v", acts[0])
 	}
 }
 
