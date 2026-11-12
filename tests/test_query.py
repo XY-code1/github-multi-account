@@ -116,6 +116,20 @@ def test_empty_result(many_accounts):
     assert r["items"] == []
 
 
+def test_avatar_url_from_payload(many_accounts):
+    """账号列表要带 GitHub 头像，供表格展示。"""
+    db.upsert_summary(1, "user1", {
+        "status": "active", "label": "账号1",
+        "user": {"avatar_url": "https://example.com/a.png"},
+    })
+    r = query_accounts(page_size=50)
+    item = next(i for i in r["items"] if i["id"] == 1)
+    assert item["avatar_url"] == "https://example.com/a.png"
+    # 没有头像的账号返回空字符串，不能报错
+    item2 = next(i for i in r["items"] if i["id"] == 2)
+    assert item2["avatar_url"] == ""
+
+
 def test_sync_failed_flagging(many_accounts):
     """活跃账号连续失败 3 次以上应标记为同步失败。"""
     db.upsert_sync_state(

@@ -313,6 +313,43 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 }
 
+func TestQueryAccountsAvatar(t *testing.T) {
+	cfg, cleanup := newTestEnv(t)
+	defer cleanup()
+	addAccounts(t, cfg, 2)
+	db := DB()
+	payload, err := json.Marshal(map[string]any{
+		"user": map[string]any{"avatar_url": "https://example.com/a.png"},
+	})
+	if err != nil {
+		t.Fatalf("构造 payload 失败: %v", err)
+	}
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 1, Username: "user1", Status: "active", Label: "账号1",
+		Payload: payload, SyncedAt: "2026-01-02T00:00:00Z",
+	})
+	accounts, _ := cfg.Accounts()
+	r, err := QueryAccounts(db, accounts, AccountQuery{PageSize: 10})
+	if err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	var first, second string
+	for _, item := range r.Items {
+		if item.ID == 1 {
+			first = item.AvatarURL
+		}
+		if item.ID == 2 {
+			second = item.AvatarURL
+		}
+	}
+	if first != "https://example.com/a.png" {
+		t.Fatalf("账号 1 的头像未带上: %q", first)
+	}
+	if second != "" {
+		t.Fatalf("账号 2 无头像应为空字符串: %q", second)
+	}
+}
+
 func TestBuildActivitiesAggregates(t *testing.T) {
 	cfg, cleanup := newTestEnv(t)
 	defer cleanup()

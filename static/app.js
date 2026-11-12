@@ -738,6 +738,7 @@ function renderDetailTab(d) {
   if (state.detailTab === "issues") box.innerHTML = issueList(d.assigned_issues);
   if (state.detailTab === "events") box.innerHTML = eventList(d.events);
   if (state.detailTab === "repos") box.innerHTML = repoList(d.repos);
+  if (state.detailTab === "social") box.innerHTML = socialHtml(d);
 }
 
 const COMPARE_COLS = [
@@ -880,6 +881,35 @@ function repoList(repos) {
       </div>
       <span class="item-time">更新于 ${relTime(r.updated_at)}</span>
     </div>`).join("")}</div>`;
+}
+
+function personGrid(items, emptyText) {
+  if (!items.length) return `<div class="empty-tab">${emptyText}</div>`;
+  return `<div class="person-grid">${items.map((p) => `
+    <a class="person-card" href="${safeUrl(p.html_url)}" target="_blank" rel="noopener" title="@${escapeHtml(p.login)}">
+      <img src="${escapeHtml(p.avatar_url)}" alt="" onerror="handleImgError(this)">
+      <span class="person-login">${escapeHtml(p.login)}</span>
+    </a>`).join("")}</div>`;
+}
+
+function socialHtml(d) {
+  const followers = d.follower_list || [];
+  const following = d.following_list || [];
+  return `
+    <div class="panel">
+      <div class="panel-head">
+        <h3>粉丝（${followers.length}）</h3>
+        <span class="panel-note">最多显示 50 个</span>
+      </div>
+      ${personGrid(followers, "暂无粉丝数据，打开详情页后会自动拉取")}
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <h3>关注（${following.length}）</h3>
+        <span class="panel-note">最多显示 50 个</span>
+      </div>
+      ${personGrid(following, "暂无关注数据，打开详情页后会自动拉取")}
+    </div>`;
 }
 
 async function loadHistoryDetail() {

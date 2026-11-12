@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path, monkeypatch):
-    from app import config, store
+    from app import config, db, store
 
     cfg = tmp_path / "config"
     data = tmp_path / "data"
@@ -25,5 +25,8 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "_cache", {"mtime": None, "accounts": None})
     monkeypatch.setattr(store, "DATA_DIR", data)
     monkeypatch.setattr(store, "DB_FILE", data / "dashboard.db")
+    # db 模块默认写项目根的 data/dashboard.db，必须一起隔离，否则测试会互相污染
+    monkeypatch.setattr(db, "DATA_DIR", data)
+    monkeypatch.setattr(db, "DB_FILE", data / "dashboard.db")
     store.init_db()
     yield

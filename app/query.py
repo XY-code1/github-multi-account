@@ -5,12 +5,22 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from . import config, db
 
 logger = logging.getLogger(__name__)
+
+
+def _avatar_url(summary: dict[str, Any]) -> str:
+    """从汇总缓存的 payload 里取 GitHub 头像地址。"""
+    try:
+        payload = json.loads(summary.get("payload") or "{}")
+    except Exception:  # noqa: BLE001
+        return ""
+    return (payload.get("user") or {}).get("avatar_url") or ""
 
 SORT_FIELDS = {
     "last_activity": "last_sync_at",
@@ -55,6 +65,7 @@ def _merged_rows() -> list[dict[str, Any]]:
                 "type": a.get("type", "personal"),
                 "group": a.get("group", ""),
                 "tags": a.get("tags", []),
+                "avatar_url": _avatar_url(s),
                 "status": status,
                 "error": s.get("error") or st.get("last_error"),
                 "last_sync_at": st.get("last_sync_at"),

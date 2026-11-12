@@ -6,6 +6,7 @@ package ops
 
 import (
 	"database/sql"
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -35,6 +36,7 @@ type AccountRow struct {
 	Type                string   `json:"type"`
 	Group               string   `json:"group"`
 	Tags                []string `json:"tags"`
+	AvatarURL           string   `json:"avatar_url"`
 	Status              string   `json:"status"`
 	Error               string   `json:"error"`
 	LastSyncAt          string   `json:"last_sync_at"`
@@ -156,6 +158,7 @@ func QueryAccounts(db *sql.DB, accounts []config.Account, q AccountQuery) (*Acco
 			Type:                typed,
 			Group:               a.Group,
 			Tags:                tags,
+			AvatarURL:           avatarFromPayload(s.Payload),
 			Status:              status,
 			Error:               errMsg,
 			LastSyncAt:          st.LastSyncAt,
@@ -305,6 +308,22 @@ func filterRows(rows []AccountRow, keep func(AccountRow) bool) []AccountRow {
 
 func containsFold(s, lowerQuery string) bool {
 	return strings.Contains(strings.ToLower(s), lowerQuery)
+}
+
+// avatarFromPayload 从汇总缓存的 payload 里取 GitHub 头像地址。
+func avatarFromPayload(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var v struct {
+		User *struct {
+			AvatarURL string `json:"avatar_url"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(payload, &v); err != nil || v.User == nil {
+		return ""
+	}
+	return v.User.AvatarURL
 }
 
 // compareRows 返回 true 表示 a 应排在 b 前面。缺失值始终排在最后。
