@@ -34,10 +34,12 @@ logger = logging.getLogger(__name__)
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "interval_seconds": 900,
-    "concurrency": 3,
+    "concurrency": 5,
     "max_retries": 3,
     "base_backoff_seconds": 60,
     "max_backoff_seconds": 3600,
+    # 单账号剩余配额低于该值时本轮跳过，避免把配额打满
+    "quota_floor": 100,
 }
 
 
@@ -85,6 +87,7 @@ class SyncEngine:
             "started_at": None,
             "finished_at": None,
             "current": None,
+            "duration_seconds": 0,
         }
 
     def configure(self, settings: dict[str, Any]) -> None:
@@ -111,17 +114,31 @@ class SyncEngine:
             self._task = None
 
     async def _run(self) -> None:
+        import time
+
+        base = int(self.cfg["interval_seconds"])
+        interval = base
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=int(self.cfg["interval_seconds"]))
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
                 break
             except asyncio.TimeoutError:
                 pass
-            if self.cfg["enabled"]:
-                try:
-                    await self.sync_all()
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("同步周期失败: %s", e)
+            if not self.cfg["enabled"]:
+                continue
+            started = time.monotonic()
+            try:
+                await self.sync_all()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("同步周期失败: %s", e)
+            elapsed = time.monotonic() - started
+            self.progress["duration_seconds"] = round(elapsed, 1)
+            # 自适应间隔：本轮耗时超过间隔时延长下一轮，避免积压
+            if base > 0 and elapsed > interval:
+                interval = min(int(elapsed * 1.2) + 60, max(base * 3, 3600))
+                logger.info("同步耗时 %.0fs 超过间隔，下一轮间隔调整为 %ds", elapsed, interval)
+            else:
+                interval = base
 
     async def sync_all(self, only_ids: list[int] | None = None) -> dict[str, Any]:
         accounts = config.load_accounts()
@@ -138,6 +155,7 @@ class SyncEngine:
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
             "current": None,
+            "duration_seconds": 0,
         }
         results = await asyncio.gather(
             *(self._guarded(sem, a) for a in accounts),
@@ -168,6 +186,11 @@ class SyncEngine:
         state = db.get_sync_state(aid) or {}
         if state.get("sync_enabled") is False:
             return {"id": aid, "ok": False, "status": "skipped", "reason": "sync_disabled"}
+        # 配额保护：剩余额度太低时本轮跳过
+        rl = db.all_rate_limits().get(aid)
+        floor = int(self.cfg.get("quota_floor", 100))
+        if rl and int(rl.get("remaining") or 0) < floor:
+            return {"id": aid, "ok": False, "status": "skipped", "reason": "quota_low"}
         nxt = state.get("next_retry_at")
         if nxt:
             try:

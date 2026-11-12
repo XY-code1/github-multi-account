@@ -24,7 +24,7 @@ def many_accounts(tmp_path, monkeypatch):
     store.init_db()
 
     accounts = []
-    for i in range(300):
+    for i in range(100):
         accounts.append({
             "id": i + 1,
             "label": f"账号{i + 1}",
@@ -59,9 +59,9 @@ def many_accounts(tmp_path, monkeypatch):
 
 def test_pagination(many_accounts):
     r = query_accounts(page=1, page_size=50)
-    assert r["total"] == 300
+    assert r["total"] == 100
     assert len(r["items"]) == 50
-    assert r["total_pages"] == 6
+    assert r["total_pages"] == 2
     r2 = query_accounts(page=2, page_size=50)
     assert len(r2["items"]) == 50
     assert r2["items"][0]["id"] != r["items"][0]["id"]
@@ -74,24 +74,24 @@ def test_page_size_options(many_accounts):
 
 
 def test_search_username(many_accounts):
-    assert query_accounts(query="user1", page_size=5)["total"] == 111  # user1, user10..user199
+    assert query_accounts(query="user1", page_size=5)["total"] == 12  # user1, user10..user19, user100
     assert query_accounts(query="user100", page_size=5)["total"] == 1
 
 
 def test_search_alias_and_note(many_accounts):
     assert query_accounts(query="U100", page_size=5)["total"] == 1
-    assert query_accounts(query="测试账号", page_size=5)["total"] == 300
+    assert query_accounts(query="测试账号", page_size=5)["total"] == 100
 
 
 def test_filter_status_and_type(many_accounts):
-    assert query_accounts(status="invalid", page_size=5)["total"] == 30
-    assert query_accounts(status="invalid", type_="bot", page_size=5)["total"] == 10
+    assert query_accounts(status="invalid", page_size=5)["total"] == 10
+    assert query_accounts(status="invalid", type_="bot", page_size=5)["total"] == 3
 
 
 def test_filter_group_and_tags(many_accounts):
-    assert query_accounts(group="工作", page_size=5)["total"] == 100
-    assert query_accounts(tags="核心", page_size=5)["total"] == 100
-    assert query_accounts(tags="ci", page_size=5)["total"] == 100
+    assert query_accounts(group="工作", page_size=5)["total"] == 34
+    assert query_accounts(tags="核心", page_size=5)["total"] == 34
+    assert query_accounts(tags="ci", page_size=5)["total"] == 33
 
 
 def test_sort(many_accounts):

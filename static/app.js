@@ -476,7 +476,11 @@ async function loadAutomation() {
         <div class="stat-card"><span class="stat-num">${tasks.config.interval_seconds}s</span><span class="stat-label">同步间隔</span></div>
         <div class="stat-card"><span class="stat-num">${tasks.states.length}</span><span class="stat-label">已跟踪账号</span></div>
         <div class="stat-card"><span class="stat-num">${tasks.running ? "运行中" : "空闲"}</span><span class="stat-label">同步状态</span></div>
-      </div>`;
+        <div class="stat-card"><span class="stat-num">${tasks.progress.duration_seconds || 0}s</span><span class="stat-label">上轮耗时</span></div>
+      </div>
+      <p style="font-size:12px;color:var(--text-faint);margin-top:10px">
+        上轮进度：${tasks.progress.done || 0}/${tasks.progress.total || 0}，失败 ${tasks.progress.failed || 0}
+      </p>`;
     document.getElementById("auditList").innerHTML = audit.items.length
       ? `<div class="item-list">${audit.items.map((a) => `
           <div class="item">

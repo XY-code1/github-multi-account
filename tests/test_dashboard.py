@@ -91,13 +91,13 @@ def test_partial_failure_isolation(populated, monkeypatch):
 
     class FakeClient:
         def __init__(self, token, timeout=12.0):
-            pass
+            self.token = token
         async def aclose(self):
             pass
         async def get_user(self):
             calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("模拟：第一个账号失败")
+            if self.token == "ghp_bad":
+                raise RuntimeError("模拟：坏号失败")
             return {"login": "ok", "followers": 1, "following": 1, "public_repos": 1}
         async def review_requested_prs(self, login):
             return 0, []
@@ -113,7 +113,7 @@ def test_partial_failure_isolation(populated, monkeypatch):
     monkeypatch.setattr(sync.service, "GitHubClient", FakeClient)
     accounts = populated
     engine = sync.SyncEngine()
-    engine.configure({"concurrency": 3})
+    engine.configure({"concurrency": 3, "quota_floor": 0})
     result = asyncio.run(engine.sync_all())
     assert result["total"] == 3
     assert result["failed"] == 1
@@ -145,9 +145,9 @@ def test_backoff_scheduling(populated, monkeypatch):
 
     monkeypatch.setattr(sync.service, "GitHubClient", AlwaysFail)
     engine = sync.SyncEngine()
-    engine.configure({"concurrency": 1})
+    engine.configure({"concurrency": 1, "quota_floor": 0})
     asyncio.run(engine.sync_all())
-    st = db.get_sync_state(2)
+    st = db.get_sync_state(1)
     assert st["consecutive_failures"] >= 1
     assert st["next_retry_at"] is not None
 
