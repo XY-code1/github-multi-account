@@ -12,7 +12,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
@@ -149,6 +149,26 @@ def list_audit(limit: int = 100, action: str | None = None) -> list[dict[str, An
                 (limit,),
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+def prune_audit(limit: int = 5000, max_days: int = 90) -> int:
+    """清理审计日志：只保留最近 limit 条，且不超过 max_days 天。
+
+    审计日志是只增不减的，长期运行会无限膨胀，启动时调用一次即可。
+    """
+    if not DB_FILE.exists():
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_days)).isoformat()
+    with _lock, _connect() as conn:
+        expired = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+        expired_count = expired.rowcount
+        overflow = conn.execute(
+            """DELETE FROM audit_log WHERE id NOT IN (
+                   SELECT id FROM audit_log ORDER BY id DESC LIMIT ?
+               )""",
+            (limit,),
+        )
+        return expired_count + overflow.rowcount
 
 
 # ------------------------------ 同步状态 ------------------------------

@@ -249,7 +249,20 @@ a:hover { text-decoration: underline; }
 .import-docx .modal-hint { margin: 6px 0 0; }
 .docx-preview { margin-top: 10px; }
 .docx-preview.hidden { display: none; }
+.docx-preview .table-wrap {
+  max-height: 42vh;
+  overflow: auto;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+}
 .docx-table { width: 100%; font-size: 12px; }
+.docx-table th, .docx-table td { padding: 5px 6px; white-space: normal; }
+.docx-table code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
 .docx-table .input-sm {
   width: 100%;
   padding: 4px 7px;
@@ -266,8 +279,15 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: 10px;
   margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-muted);
 }
 .docx-summary { font-size: 12px; color: var(--text-faint); }
+.docx-cap {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--warning);
+}
 
 /* ---------------- 社交（粉丝 / 关注） ---------------- */
 
@@ -756,6 +776,8 @@ a:hover { text-decoration: underline; }
 .modal {
   width: 100%;
   max-width: 460px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -765,9 +787,18 @@ a:hover { text-decoration: underline; }
   gap: 12px;
   box-shadow: var(--shadow);
 }
-.modal-lg { max-width: 720px; }
+.modal-lg { max-width: 760px; }
 .modal h3 { font-size: 16px; }
 .modal-hint { font-size: 12px; color: var(--text-muted); margin-top: -8px; }
+/* 操作栏吸底：弹窗内容再长也能一键提交 */
+.modal-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 0 -20px -20px;
+  padding: 12px 20px 16px;
+  background: var(--bg);
+  border-top: 1px solid var(--border-muted);
+}
 
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field > span { font-size: 12px; color: var(--text-muted); }

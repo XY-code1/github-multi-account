@@ -370,6 +370,26 @@ func Audit(db *sql.DB, action string, accountID *int, username, detail string) {
 		now(), action, accountID, username, detail)
 }
 
+// PruneAudit 清理审计日志：只保留最近 limit 条，且不超过 maxDays 天。
+// 审计日志只增不减，长期运行会无限膨胀，启动时调用一次即可。
+func PruneAudit(db *sql.DB, limit, maxDays int) (int, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	cutoff := time.Now().UTC().AddDate(0, 0, -maxDays).Format(time.RFC3339)
+	total := 0
+	if res, err := db.Exec(`DELETE FROM audit_log WHERE ts < ?`, cutoff); err == nil {
+		n, _ := res.RowsAffected()
+		total += int(n)
+	}
+	if res, err := db.Exec(`DELETE FROM audit_log WHERE id NOT IN (
+		SELECT id FROM audit_log ORDER BY id DESC LIMIT ?
+	)`, limit); err == nil {
+		n, _ := res.RowsAffected()
+		total += int(n)
+	}
+	return total, nil
+}
+
 // ListAudit 返回审计日志（新的在前）。
 func ListAudit(db *sql.DB, limit int, action string) ([]AuditItem, error) {
 	mu.Lock()

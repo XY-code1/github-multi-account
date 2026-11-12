@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI):
             logger.info("已清理历史快照 %d 条", pruned["deleted"])
     except Exception as e:  # noqa: BLE001
         logger.warning("快照清理失败: %s", e)
+    try:
+        audited = db.prune_audit()
+        if audited:
+            logger.info("已清理审计日志 %d 条", audited)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("审计日志清理失败: %s", e)
     if notify.load_channels():
         poller.start()
         logger.info("外部通知轮询已启动")

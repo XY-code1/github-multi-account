@@ -159,3 +159,19 @@ def test_batch_operations(client):
     assert client.post("/api/accounts/batch-tag", json={"ids": ids, "tags": []}).status_code == 400
     assert client.post("/api/accounts/batch-group", json={"ids": ids, "group": ""}).status_code == 400
     assert client.post("/api/accounts/batch-toggle-sync", json={"ids": []}).status_code == 400
+
+
+def test_prune_audit():
+    """审计日志只增不减，需要按条数与保留期清理。"""
+    from app import db
+
+    for i in range(10):
+        db.audit("test.action", None, "", f"第 {i} 条")
+    assert len(db.list_audit(100)) == 10
+
+    assert db.prune_audit(limit=5, max_days=90) == 5
+    assert len(db.list_audit(100)) == 5
+
+    # 保留期外的一律清掉
+    assert db.prune_audit(limit=100, max_days=-1) == 5
+    assert db.list_audit(100) == []

@@ -99,6 +99,9 @@ func run(base string) error {
 	if n, err := st.Prune(1000, 90); err == nil && n > 0 {
 		log.Printf("已清理历史快照 %d 条", n)
 	}
+	if n, err := ops.PruneAudit(st.DB(), 5000, 90); err == nil && n > 0 {
+		log.Printf("已清理审计日志 %d 条", n)
+	}
 
 	svc := &service.Service{Store: st}
 	assetsSub, err := fs.Sub(assetsFS, "assets")

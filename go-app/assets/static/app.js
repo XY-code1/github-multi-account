@@ -106,11 +106,8 @@ const state = {
   detailTab: "overview",
   history: [],
   metric: "followers",
-  notifications: false,
   prefetchEnabled: false,
   version: null,
-  collapsedGroups: new Set(),
-  lastRefresh: null,
 };
 
 // ---------------- 路由 ----------------
@@ -548,9 +545,14 @@ async function handleDocxFile(e) {
   }
 }
 
+const DOCX_PREVIEW_LIMIT = 200;
+
 function renderDocxPreview(candidates) {
   const box = document.getElementById("docxPreview");
-  const rows = candidates.map((c) => `
+  // 预览表格较宽，加宽弹窗；行数封顶，超出的提示
+  document.getElementById("modal").classList.add("modal-lg");
+  const shown = candidates.slice(0, DOCX_PREVIEW_LIMIT);
+  const rows = shown.map((c) => `
     <tr data-index="${c.index}" class="${c.valid ? "" : "row-invalid"}">
       <td class="col-check"><input type="checkbox" class="docx-check" data-index="${c.index}" ${c.valid ? "checked" : ""}></td>
       <td><input class="input-sm docx-username" data-index="${c.index}" value="${escapeHtml(c.username)}" placeholder="GitHub 用户名"></td>
@@ -558,6 +560,9 @@ function renderDocxPreview(candidates) {
       <td><code>${escapeHtml(c.token_masked)}</code></td>
       <td>${c.valid ? '<span class="status-badge active">有效</span>' : '<span class="status-badge invalid">无效</span>'}</td>
     </tr>`).join("");
+  const capped = candidates.length > shown.length
+    ? `<div class="docx-cap">共 ${candidates.length} 个账号，仅显示前 ${shown.length} 个</div>`
+    : "";
   box.innerHTML = `
     <div class="table-wrap"><table class="data-table docx-table">
       <thead><tr>
@@ -566,6 +571,7 @@ function renderDocxPreview(candidates) {
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
+    ${capped}
     <div class="docx-actions">
       <span class="docx-summary" id="docxSummary"></span>
       <span class="spacer"></span>
@@ -1087,6 +1093,7 @@ function debounce(fn, ms) {
 
 function openModal() {
   document.getElementById("modal").classList.remove("hidden");
+  document.getElementById("modal").classList.remove("modal-lg");
   document.getElementById("fUsername").focus();
 }
 
@@ -1096,6 +1103,8 @@ function closeModal() {
   document.getElementById("fType").value = "personal";
   document.getElementById("testResult").textContent = "";
   // 重置 Word 导入
+  const modalEl = document.getElementById("modal");
+  modalEl.classList.remove("modal-lg");
   const preview = document.getElementById("docxPreview");
   preview.classList.add("hidden");
   preview.innerHTML = "";
@@ -1373,6 +1382,14 @@ function toggleCheckAll() {
 
 // ---------------- 快捷键 ----------------
 
+function openShortcutsModal() {
+  document.getElementById("shortcutsModal").classList.remove("hidden");
+}
+
+function closeShortcutsModal() {
+  document.getElementById("shortcutsModal").classList.add("hidden");
+}
+
 function onKeydown(e) {
   if (e.key === "Escape") {
     ["modal", "backupModal", "notifyModal", "syncModal", "shortcutsModal"].forEach((id) => {
@@ -1392,6 +1409,7 @@ function onKeydown(e) {
   if (k === "r") syncNow();
   if (k === "a") openModal();
   if (k === "/") { e.preventDefault(); focusGlobalSearch(); }
+  if (k === "?") { e.preventDefault(); openShortcutsModal(); }
 }
 
 // ---------------- 事件绑定 ----------------
@@ -1418,6 +1436,7 @@ function bindEvents() {
   document.getElementById("menuNotify").addEventListener("click", () => { closeMoreMenu(); openNotifyModal(); });
   document.getElementById("menuPrefetch").addEventListener("change", (e) => { closeMoreMenu(); setPrefetch(e.target.checked); });
   document.getElementById("menuCheckUpdate").addEventListener("click", () => { closeMoreMenu(); checkUpdate(); });
+  document.getElementById("menuShortcuts").addEventListener("click", () => { closeMoreMenu(); openShortcutsModal(); });
   document.addEventListener("click", (e) => {
     if (!e.target.closest("#globalSearchWrap")) closeGlobalSearch();
     if (!e.target.closest(".menu-wrap")) closeMoreMenu();
@@ -1444,6 +1463,8 @@ function bindEvents() {
   document.getElementById("openSyncSettings").addEventListener("click", openSyncModal);
   document.getElementById("automationSyncNow").addEventListener("click", syncNow);
   document.getElementById("syncCloseBtn").addEventListener("click", () => document.getElementById("syncModal").classList.add("hidden"));
+  document.getElementById("shortcutsCloseBtn").addEventListener("click", closeShortcutsModal);
+  document.getElementById("shortcutsModal").addEventListener("click", (e) => { if (e.target.id === "shortcutsModal") closeShortcutsModal(); });
   document.getElementById("syncModal").addEventListener("click", (e) => { if (e.target.id === "syncModal") document.getElementById("syncModal").classList.add("hidden"); });
   document.getElementById("syncNowBtn").addEventListener("dblclick", openSyncModal);
 

@@ -313,6 +313,43 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 }
 
+func TestPruneAudit(t *testing.T) {
+	_, cleanup := newTestEnv(t)
+	defer cleanup()
+	db := DB()
+
+	for i := 0; i < 10; i++ {
+		Audit(db, "test.action", nil, "", "x")
+	}
+	items, err := ListAudit(db, 100, "")
+	if err != nil {
+		t.Fatalf("读取审计失败: %v", err)
+	}
+	if len(items) != 10 {
+		t.Fatalf("应写入 10 条审计，得到 %d", len(items))
+	}
+
+	n, err := PruneAudit(db, 5, 90)
+	if err != nil {
+		t.Fatalf("清理审计失败: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("应清理 5 条，得到 %d", n)
+	}
+	items, _ = ListAudit(db, 100, "")
+	if len(items) != 5 {
+		t.Fatalf("应保留 5 条，得到 %d", len(items))
+	}
+
+	// 保留期之外的一律清掉
+	if n, _ := PruneAudit(db, 100, -1); n != 5 {
+		t.Fatalf("应清理剩余 5 条，得到 %d", n)
+	}
+	if items, _ = ListAudit(db, 100, ""); len(items) != 0 {
+		t.Fatalf("审计应清空，得到 %d 条", len(items))
+	}
+}
+
 func TestQueryAccountsAvatar(t *testing.T) {
 	cfg, cleanup := newTestEnv(t)
 	defer cleanup()
