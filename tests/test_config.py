@@ -87,6 +87,24 @@ def test_add_account_keeps_metadata():
     assert account["tags"] == ["核心"]
 
 
+def test_settings_sections_do_not_overwrite_each_other():
+    """通知渠道与同步设置共用 settings.yaml，任一方保存都不应清空另一方。"""
+    from app import notify, sync
+
+    notify.save_channels([{"type": "bark", "name": "iPhone", "url": "https://x", "enabled": True}])
+    sync.save_settings({"enabled": True, "interval_seconds": 900, "concurrency": 5})
+
+    channels = notify.load_channels()
+    assert len(channels) == 1 and channels[0]["name"] == "iPhone"
+    assert sync.load_settings()["interval_seconds"] == 900
+
+    # 反向：先写同步设置，再写渠道，同步设置也应保留
+    sync.save_settings({"enabled": False, "interval_seconds": 600, "concurrency": 3})
+    notify.save_channels([])
+    assert sync.load_settings()["interval_seconds"] == 600
+    assert sync.load_settings()["enabled"] is False
+
+
 def test_import_is_idempotent_and_skips_invalid():
     backup = {
         "accounts": [

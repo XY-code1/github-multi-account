@@ -231,12 +231,19 @@ def upsert_sync_state(account_id: int, username: str, **fields: Any) -> None:
                 )
 
 
-def set_sync_enabled(account_id: int, enabled: bool) -> None:
+def set_sync_enabled(account_id: int, enabled: bool, username: str | None = None) -> None:
+    """启用 / 暂停某账号的同步。
+
+    账号从未同步过（sync_state 里没有行）时也会创建状态行，
+    否则暂停操作会静默失效。
+    """
     ts = datetime.now(timezone.utc).isoformat()
     with _lock, _connect() as conn:
         conn.execute(
-            "UPDATE sync_state SET sync_enabled=?, updated_at=? WHERE account_id=?",
-            (1 if enabled else 0, ts, account_id),
+            "INSERT INTO sync_state (account_id, username, sync_enabled, updated_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET "
+            "sync_enabled=excluded.sync_enabled, updated_at=excluded.updated_at",
+            (account_id, username or "", 1 if enabled else 0, ts),
         )
 
 

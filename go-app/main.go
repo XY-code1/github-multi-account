@@ -116,25 +116,11 @@ func run(base string) error {
 	if err != nil {
 		return err
 	}
-	metas := make([]ops.Meta, 0, len(accounts))
-	for _, a := range accounts {
-		metas = append(metas, ops.Meta{
-			AccountID: a.ID,
-			Username:  a.Username,
-			Type:      a.Type,
-			Tags:      a.Tags,
-			Note:      a.Note,
-			Alias:     a.Alias,
-			GroupName: a.Group,
-		})
-	}
-	if err := ops.RebuildMeta(st.DB(), metas); err != nil {
-		log.Printf("重建账号元数据失败: %v", err)
-	}
 	engine := ops.NewEngine(st.DB(), cfg, svc, configDir)
 	srv.SetOpsDB(st.DB())
 	srv.SetEngine(engine)
 	srv.SetConfigDir(configDir)
+	srv.RebuildMeta()
 
 	poller := notify.NewPoller(base, 5*time.Minute, cfg, svc)
 	srv.SetPoller(poller)

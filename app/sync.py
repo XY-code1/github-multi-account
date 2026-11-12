@@ -44,13 +44,10 @@ DEFAULTS: dict[str, Any] = {
 
 
 def save_settings(cfg: dict[str, Any]) -> None:
-    """持久化同步配置到 config/settings.yaml。"""
-    path = _settings_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump({"sync": cfg}, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+    """持久化同步配置到 config/settings.yaml（保留通知渠道等其他分节）。"""
+    data = config.read_settings()
+    data["sync"] = cfg
+    config.write_settings(data)
 
 
 def _settings_file() -> Path:

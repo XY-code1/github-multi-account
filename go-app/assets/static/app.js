@@ -107,7 +107,7 @@ const state = {
   history: [],
   metric: "followers",
   notifications: false,
-  prefetchEnabled: true,
+  prefetchEnabled: false,
   collapsedGroups: new Set(),
   lastRefresh: null,
 };
@@ -130,7 +130,10 @@ function go(page) {
   const scrollers = document.querySelectorAll(".main");
   scrollers.forEach((s) => (s.scrollTop = 0));
   if (page === "overview") loadOverview();
-  if (page === "accounts") loadAccountsPage();
+  if (page === "accounts") {
+    loadAccountsPage();
+    if (state.prefetchEnabled) runPrefetch();
+  }
   if (page === "todos") loadTodos();
   if (page === "automation") loadAutomation();
 }
@@ -371,6 +374,8 @@ async function syncAccount(id) {
   try {
     await api(`/api/accounts/${id}/sync`, { method: "POST" });
     showToast("已同步");
+    // 同步后旧详情已过期，清掉缓存避免展示旧数据
+    if (state.detailCache) delete state.detailCache[id];
     await loadAccountsPage(false);
     if (state.page === "detail" && state.detail && state.detail.id === id) await openAccountDetail(id);
   } catch (e) {
@@ -386,6 +391,7 @@ async function batchRefresh() {
       body: JSON.stringify({ ids: [...state.selected] }),
     });
     showToast(`已刷新 ${state.selected.size} 个账号`);
+    state.detailCache = {};
     await loadAccountsPage(false);
   } catch (e) {
     showToast(e.message);
@@ -423,6 +429,56 @@ function downloadJson(obj, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ---------------- 批量操作 ----------------
+
+async function batchSetSync(enabled) {
+  if (!state.selected.size) return;
+  try {
+    await api("/api/accounts/batch-toggle-sync", {
+      method: "POST",
+      body: JSON.stringify({ ids: [...state.selected], enabled }),
+    });
+    showToast(enabled ? `已启用 ${state.selected.size} 个账号的同步` : `已暂停 ${state.selected.size} 个账号的同步`);
+    await loadAccountsPage(false);
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function batchTag() {
+  if (!state.selected.size) return;
+  const input = prompt(`给选中的 ${state.selected.size} 个账号添加标签（逗号分隔）`, "");
+  if (input === null) return;
+  const tags = input.split(",").map((t) => t.trim()).filter(Boolean);
+  if (!tags.length) return;
+  try {
+    await api("/api/accounts/batch-tag", {
+      method: "POST",
+      body: JSON.stringify({ ids: [...state.selected], tags, mode: "append" }),
+    });
+    showToast(`已给 ${state.selected.size} 个账号打标签`);
+    await loadAccountsPage(false);
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function batchGroup() {
+  if (!state.selected.size) return;
+  const group = prompt(`把选中的 ${state.selected.size} 个账号移动到分组`, "");
+  if (group === null || !group.trim()) return;
+  try {
+    await api("/api/accounts/batch-group", {
+      method: "POST",
+      body: JSON.stringify({ ids: [...state.selected], group: group.trim() }),
+    });
+    showToast(`已移动 ${state.selected.size} 个账号到「${group.trim()}」`);
+    await loadAccountsPage(false);
+  } catch (e) {
+    showToast(e.message);
+  }
 }
 
 // ---------------- 统一待办 ----------------
@@ -475,7 +531,7 @@ async function loadAutomation() {
         <div class="stat-card"><span class="stat-num">${tasks.config.concurrency}</span><span class="stat-label">并发上限</span></div>
         <div class="stat-card"><span class="stat-num">${tasks.config.interval_seconds}s</span><span class="stat-label">同步间隔</span></div>
         <div class="stat-card"><span class="stat-num">${tasks.states.length}</span><span class="stat-label">已跟踪账号</span></div>
-        <div class="stat-card"><span class="stat-num">${tasks.running ? "运行中" : "空闲"}</span><span class="stat-label">同步状态</span></div>
+        <div class="stat-card"><span class="stat-num">${({ idle: "空闲", running: "同步中" })[tasks.progress?.status] || "空闲"}</span><span class="stat-label">同步状态</span></div>
         <div class="stat-card"><span class="stat-num">${tasks.progress.duration_seconds || 0}s</span><span class="stat-label">上轮耗时</span></div>
       </div>
       <p style="font-size:12px;color:var(--text-faint);margin-top:10px">
@@ -606,7 +662,7 @@ function compareHtml(d) {
       <td>${a.assigned_issues}</td>
       <td>${a.total_stars}</td>
     </tr>`).join("");
-  return `<div class="panel"><div class="panel-head"><h3>与全部账号对比</h3></div>
+  return `<div class="panel"><div class="panel-head"><h3>与当前列表对比</h3></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th>账号</th>${COMPARE_COLS.map((c) => `<th>${c.label}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 
@@ -740,6 +796,7 @@ async function syncNow() {
   try {
     const r = await api("/api/sync/run", { method: "POST" });
     showToast(`同步完成：成功 ${r.done}，失败 ${r.failed}`);
+    state.detailCache = {};
     await loadOverview();
   } catch (e) {
     showToast(e.message);
@@ -778,12 +835,40 @@ async function saveSyncSettings() {
 
 // ---------------- 预取 ----------------
 
+let prefetchInFlight = false;
+const PREFETCH_LIMIT = 10;
+const PREFETCH_CONCURRENCY = 2;
+
 function togglePrefetch() {
   state.prefetchEnabled = !state.prefetchEnabled;
   const btn = document.getElementById("prefetchBtn");
   btn.classList.toggle("active", state.prefetchEnabled);
   btn.textContent = state.prefetchEnabled ? "预取·开" : "预取·关";
-  showToast(state.prefetchEnabled ? "已开启详情预取" : "已关闭详情预取");
+  showToast(state.prefetchEnabled ? "已开启详情预取（会消耗 GitHub 配额）" : "已关闭详情预取");
+  if (state.prefetchEnabled) runPrefetch();
+}
+
+// 限量预取当前列表前若干个账号的详情，写入缓存供详情页秒开。
+async function runPrefetch() {
+  if (prefetchInFlight) return;
+  const ids = (state.accounts?.items || []).slice(0, PREFETCH_LIMIT).map((a) => a.id);
+  if (!ids.length) return;
+  prefetchInFlight = true;
+  let next = 0;
+  async function worker() {
+    while (next < ids.length) {
+      const id = ids[next++];
+      try {
+        const data = await api(`/api/status/${id}`);
+        state.detailCache[id] = data.account;
+      } catch (e) { /* 单个失败不影响其他 */ }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
+  } finally {
+    prefetchInFlight = false;
+  }
 }
 
 // ---------------- 版本 ----------------
@@ -815,18 +900,6 @@ function debounce(fn, ms) {
     clearTimeout(t);
     t = setTimeout(() => fn(...args), ms);
   };
-}
-
-function downloadJson(obj, filename) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ---------------- 添加账号 ----------------
@@ -1132,7 +1205,6 @@ function onKeydown(e) {
 
 function bindEvents() {
   document.querySelectorAll(".nav-item").forEach((n) => n.addEventListener("click", () => go(n.dataset.page)));
-  document.getElementById("viewAllAccounts").addEventListener("click", () => go("accounts"));
   document.getElementById("globalSearchBtn").addEventListener("click", openSearchModal);
   document.getElementById("syncNowBtn").addEventListener("click", syncNow);
   document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
@@ -1190,6 +1262,10 @@ function bindEvents() {
   document.getElementById("checkAll").addEventListener("change", toggleCheckAll);
   document.getElementById("batchRefresh").addEventListener("click", batchRefresh);
   document.getElementById("batchExport").addEventListener("click", batchExport);
+  document.getElementById("batchPause").addEventListener("click", () => batchSetSync(false));
+  document.getElementById("batchResume").addEventListener("click", () => batchSetSync(true));
+  document.getElementById("batchTag").addEventListener("click", batchTag);
+  document.getElementById("batchGroup").addEventListener("click", batchGroup);
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

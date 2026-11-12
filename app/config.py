@@ -37,6 +37,27 @@ def _ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def read_settings() -> dict[str, Any]:
+    """读取 config/settings.yaml 原始内容（缺失或损坏时返回空字典）。
+
+    通知渠道与同步设置共用这一个文件，任何一方保存时都必须先读取再合并，
+    否则会把另一方的配置整份覆盖掉。
+    """
+    try:
+        data = yaml.safe_load((CONFIG_DIR / "settings.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_settings(data: dict[str, Any]) -> None:
+    """写回 config/settings.yaml（保留文件中其他分节）。"""
+    _ensure_config_dir()
+    (CONFIG_DIR / "settings.yaml").write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+
+
 def load_accounts() -> list[dict[str, Any]]:
     """读取全部账号配置（自动解密 Token，带内存缓存）。"""
     try:

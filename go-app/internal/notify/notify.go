@@ -50,16 +50,12 @@ func LoadChannels(baseDir string) []Channel {
 	return f.Channels
 }
 
-// SaveChannels 保存渠道配置。
+// SaveChannels 保存渠道配置（保留同步设置等其他分节，不整份覆盖）。
 func SaveChannels(baseDir string, channels []Channel) error {
-	if err := os.MkdirAll(filepath.Join(baseDir, "config"), 0o755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(&settingsFile{Channels: channels})
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath(baseDir), data, 0o600)
+	dir := filepath.Join(baseDir, "config")
+	data := config.ReadSettings(dir)
+	data["channels"] = channels
+	return config.WriteSettings(dir, data)
 }
 
 // SendChannel 向单个渠道推送。

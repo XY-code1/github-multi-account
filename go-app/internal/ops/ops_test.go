@@ -239,7 +239,7 @@ func TestSyncAccountBackoffAndQuotaGuard(t *testing.T) {
 	eng.conf.QuotaFloor = 0
 	eng.mu.Unlock()
 
-	ok, status := eng.SyncAccount(accounts[0])
+	ok, status, _ := eng.SyncAccount(accounts[0])
 	if ok || status != "invalid" {
 		t.Fatalf("坏号应同步失败: ok=%v status=%q", ok, status)
 	}
@@ -251,7 +251,7 @@ func TestSyncAccountBackoffAndQuotaGuard(t *testing.T) {
 		t.Fatal("应写入退避时间")
 	}
 	// 退避期间再次同步应被推迟
-	if ok, status := eng.SyncAccount(accounts[0]); ok || status != "deferred" {
+	if ok, status, _ := eng.SyncAccount(accounts[0]); ok || status != "deferred" {
 		t.Fatalf("退避期间应推迟: ok=%v status=%q", ok, status)
 	}
 
@@ -270,7 +270,7 @@ func TestSyncAccountBackoffAndQuotaGuard(t *testing.T) {
 		AccountID: accounts[0].ID, Username: accounts[0].Username,
 		LastStatus: "invalid", SyncEnabled: 1, UpdatedAt: "2026-01-01T00:00:00Z",
 	})
-	if ok, status := eng.SyncAccount(accounts[0]); ok || status != "skipped" {
+	if ok, status, _ := eng.SyncAccount(accounts[0]); ok || status != "skipped" {
 		t.Fatalf("低配额应跳过: ok=%v status=%q", ok, status)
 	}
 }
@@ -279,6 +279,36 @@ func mustUpsertSummary(t *testing.T, db *sql.DB, s SummaryRow) {
 	t.Helper()
 	if err := UpsertSummary(db, s); err != nil {
 		t.Fatalf("写入汇总失败: %v", err)
+	}
+}
+
+func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveSettings(dir, DefaultConfig()); err != nil {
+		t.Fatalf("写同步设置失败: %v", err)
+	}
+	// 模拟 notify 保存渠道
+	data := config.ReadSettings(dir)
+	data["channels"] = []map[string]any{{
+		"type": "bark", "name": "iPhone", "url": "https://x", "enabled": true,
+	}}
+	if err := config.WriteSettings(dir, data); err != nil {
+		t.Fatalf("写渠道失败: %v", err)
+	}
+	// 再写同步设置，渠道应保留
+	cfg := DefaultConfig()
+	cfg.IntervalSeconds = 600
+	if err := SaveSettings(dir, cfg); err != nil {
+		t.Fatalf("再写同步设置失败: %v", err)
+	}
+
+	raw := config.ReadSettings(dir)
+	channels, ok := raw["channels"].([]any)
+	if !ok || len(channels) != 1 {
+		t.Fatalf("渠道被覆盖: %#v", raw["channels"])
+	}
+	if loaded := LoadSettings(dir); loaded.IntervalSeconds != 600 {
+		t.Fatalf("同步设置丢失: %+v", loaded)
 	}
 }
 

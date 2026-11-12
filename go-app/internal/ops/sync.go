@@ -13,15 +13,11 @@ import (
 	"encoding/json"
 	"log"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github-multi-account/internal/config"
 	"github-multi-account/internal/service"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Config 是同步引擎配置（对应 config/settings.yaml 的 sync 段）。
@@ -105,42 +101,33 @@ func NewEngine(db *sql.DB, cfg *config.Store, svc *service.Service, configDir st
 	return e
 }
 
-// settingsPath 返回 settings.yaml 路径。
-func settingsPath(dir string) string { return filepath.Join(dir, "settings.yaml") }
-
 // LoadSettings 读取配置，缺失或损坏时回退默认值。
 // 只有显式出现在文件中的键才会覆盖默认值（与 Python 版一致）。
 func LoadSettings(dir string) Config {
 	cfg := DefaultConfig()
-	data, err := os.ReadFile(settingsPath(dir))
-	if err != nil {
+	raw, ok := config.ReadSettings(dir)["sync"].(map[string]any)
+	if !ok {
 		return cfg
 	}
-	var f struct {
-		Sync map[string]any `yaml:"sync"`
-	}
-	if err := yaml.Unmarshal(data, &f); err != nil || f.Sync == nil {
-		return cfg
-	}
-	if v, ok := f.Sync["enabled"].(bool); ok {
+	if v, ok := raw["enabled"].(bool); ok {
 		cfg.Enabled = v
 	}
-	if v, ok := asInt(f.Sync["interval_seconds"]); ok && v != 0 {
+	if v, ok := asInt(raw["interval_seconds"]); ok && v != 0 {
 		cfg.IntervalSeconds = v
 	}
-	if v, ok := asInt(f.Sync["concurrency"]); ok && v != 0 {
+	if v, ok := asInt(raw["concurrency"]); ok && v != 0 {
 		cfg.Concurrency = v
 	}
-	if v, ok := asInt(f.Sync["max_retries"]); ok && v != 0 {
+	if v, ok := asInt(raw["max_retries"]); ok && v != 0 {
 		cfg.MaxRetries = v
 	}
-	if v, ok := asInt(f.Sync["base_backoff_seconds"]); ok && v != 0 {
+	if v, ok := asInt(raw["base_backoff_seconds"]); ok && v != 0 {
 		cfg.BaseBackoffSeconds = v
 	}
-	if v, ok := asInt(f.Sync["max_backoff_seconds"]); ok && v != 0 {
+	if v, ok := asInt(raw["max_backoff_seconds"]); ok && v != 0 {
 		cfg.MaxBackoffSeconds = v
 	}
-	if v, ok := asInt(f.Sync["quota_floor"]); ok && v != 0 {
+	if v, ok := asInt(raw["quota_floor"]); ok && v != 0 {
 		cfg.QuotaFloor = v
 	}
 	return cfg
@@ -159,18 +146,11 @@ func asInt(v any) (int, bool) {
 	}
 }
 
-// SaveSettings 持久化配置。
+// SaveSettings 持久化配置（保留通知渠道等其他分节）。
 func SaveSettings(dir string, cfg Config) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(struct {
-		Sync Config `yaml:"sync"`
-	}{Sync: cfg})
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath(dir), data, 0o600)
+	data := config.ReadSettings(dir)
+	data["sync"] = cfg
+	return config.WriteSettings(dir, data)
 }
 
 // Configure 应用部分更新并持久化。
@@ -358,7 +338,7 @@ func (e *Engine) SyncAll(onlyIDs []int) Result {
 			e.prog.Current = acc.Username
 			e.mu.Unlock()
 
-			ok, _ := e.SyncAccount(acc)
+			ok, _, _ := e.SyncAccount(acc)
 
 			mu.Lock()
 			if ok {
@@ -385,19 +365,19 @@ func (e *Engine) SyncAll(onlyIDs []int) Result {
 }
 
 // SyncAccount 同步单个账号：失败隔离 + 指数退避。返回是否成功。
-func (e *Engine) SyncAccount(acc config.Account) (bool, string) {
+func (e *Engine) SyncAccount(acc config.Account) (bool, string, string) {
 	aid := acc.ID
 	state, _ := GetSyncState(e.db, aid)
 	if state != nil && !state.Enabled() {
-		return false, "skipped"
+		return false, "skipped", "sync_disabled"
 	}
 	limits, _ := AllRateLimits(e.db)
 	if rl, ok := limits[aid]; ok && rl.Remaining < e.Config().QuotaFloor {
-		return false, "skipped"
+		return false, "skipped", "quota_low"
 	}
 	if state != nil && state.NextRetryAt != "" {
 		if t, err := time.Parse(time.RFC3339, state.NextRetryAt); err == nil && time.Now().UTC().Before(t) {
-			return false, "deferred"
+			return false, "deferred", ""
 		}
 	}
 
@@ -484,7 +464,7 @@ func (e *Engine) SyncAccount(acc config.Account) (bool, string) {
 		Error:          st.Error,
 		SyncedAt:       ts,
 	})
-	return st.Status == "active", st.Status
+	return st.Status == "active", st.Status, ""
 }
 
 func toInt(v any) int {

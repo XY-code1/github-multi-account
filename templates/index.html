@@ -36,7 +36,7 @@
       <button id="globalSearchBtn" class="btn" title="全局搜索（Ctrl+K）">搜索</button>
       <button id="syncNowBtn" class="btn" title="立即同步全部账号">同步</button>
       <button id="syncSettingsBtn" class="btn" title="同步设置（并发 / 间隔 / 退避）">设置</button>
-      <button id="prefetchBtn" class="btn" title="后台预取详情">预取·开</button>
+      <button id="prefetchBtn" class="btn" title="后台预取详情（会消耗 GitHub 配额）">预取·关</button>
       <button id="notifyBtn" class="btn" title="外部通知设置">通知</button>
       <button id="versionBtn" class="btn" title="当前版本，点击检查更新" style="display:none"></button>
       <button id="themeBtn" class="btn" title="切换主题（T）">◐</button>
@@ -54,11 +54,6 @@
         <a class="nav-item" data-page="todos"><span class="nav-icon">✓</span>统一待办<span id="todoBadge" class="count-badge hidden">0</span></a>
         <a class="nav-item" data-page="automation"><span class="nav-icon">⚙</span>自动化任务</a>
       </nav>
-      <div class="side-section">
-        <h3>置顶账号</h3>
-        <div id="pinnedAccounts" class="pinned-list"></div>
-        <a id="viewAllAccounts" class="side-link" data-page="accounts">查看全部账号 →</a>
-      </div>
     </aside>
 
     <main class="main">
@@ -83,7 +78,6 @@
               <button class="chip active" data-type="all">全部</button>
               <button class="chip" data-type="pr">PR</button>
               <button class="chip" data-type="issue">Issue</button>
-              <button class="chip" data-type="account">账号异常</button>
             </div>
           </div>
           <div id="overviewActivities"></div>

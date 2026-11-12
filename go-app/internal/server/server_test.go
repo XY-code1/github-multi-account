@@ -17,6 +17,13 @@ import (
 
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
+	h, _, _ := newTestEnv(t)
+	return h
+}
+
+// newTestEnv 返回测试用的 handler 以及底层的配置与存储，便于直接构造数据。
+func newTestEnv(t *testing.T) (http.Handler, *config.Store, *store.Store) {
+	t.Helper()
 	cfg, err := config.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("打开配置失败: %v", err)
@@ -39,7 +46,8 @@ func newTestHandler(t *testing.T) http.Handler {
 	srv := New(cfg, svc, st, assets)
 	srv.SetOpsDB(st.DB())
 	srv.SetEngine(ops.NewEngine(st.DB(), cfg, svc, t.TempDir()))
-	return srv.Handler()
+	srv.RebuildMeta()
+	return srv.Handler(), cfg, st
 }
 
 func do(h http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -189,5 +197,74 @@ func Test404s(t *testing.T) {
 	// 不存在的方法/路径组合返回 405（Go ServeMux 语义）
 	if w := do(h, http.MethodGet, "/api/accounts/1", "", nil); w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/accounts/{id} 应返回 405，得到 %d", w.Code)
+	}
+}
+
+func TestBatchTagAndGroup(t *testing.T) {
+	h, cfg, _ := newTestEnv(t)
+	if w := do(h, http.MethodPost, "/api/accounts", `{"username":"u1","token":"t1","group":"工作"}`, nil); w.Code != http.StatusOK {
+		t.Fatalf("建号失败: %d", w.Code)
+	}
+	do(h, http.MethodPost, "/api/accounts", `{"username":"u2","token":"t2","group":"个人"}`, nil)
+
+	w := do(h, http.MethodPost, "/api/accounts/batch-tag", `{"ids":[1,2],"tags":["核心","ci"]}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("批量打标签失败: %d %s", w.Code, w.Body.String())
+	}
+	accounts, _ := cfg.Accounts()
+	for _, a := range accounts {
+		if len(a.Tags) != 2 {
+			t.Fatalf("标签未保存: %v", a.Tags)
+		}
+	}
+
+	w = do(h, http.MethodPost, "/api/accounts/batch-group", `{"ids":[1,2],"group":"测试"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("批量分组失败: %d %s", w.Code, w.Body.String())
+	}
+	accounts, _ = cfg.Accounts()
+	for _, a := range accounts {
+		if a.Group != "测试" {
+			t.Fatalf("分组未保存: %q", a.Group)
+		}
+	}
+
+	// 幂等：重复打同一个标签不应重复
+	do(h, http.MethodPost, "/api/accounts/batch-tag", `{"ids":[1],"tags":["核心"]}`, nil)
+	accounts, _ = cfg.Accounts()
+	if len(accounts[0].Tags) != 2 {
+		t.Fatalf("标签重复: %v", accounts[0].Tags)
+	}
+
+	if w := do(h, http.MethodPost, "/api/accounts/batch-tag", `{"ids":[1],"tags":[]}`, nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("空标签应 400，得到 %d", w.Code)
+	}
+	if w := do(h, http.MethodPost, "/api/accounts/batch-group", `{"ids":[1],"group":""}`, nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("空分组应 400，得到 %d", w.Code)
+	}
+}
+
+func TestBatchToggleSync(t *testing.T) {
+	h, _, st := newTestEnv(t)
+	do(h, http.MethodPost, "/api/accounts", `{"username":"u1","token":"t1"}`, nil)
+	// 刻意不预先创建 sync_state：暂停操作应自建状态行，否则会静默失效
+	w := do(h, http.MethodPost, "/api/accounts/batch-toggle-sync", `{"ids":[1],"enabled":false}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("暂停同步失败: %d %s", w.Code, w.Body.String())
+	}
+	state, _ := ops.GetSyncState(st.DB(), 1)
+	if state == nil || state.Enabled() {
+		t.Fatalf("应已暂停同步并创建状态行: %+v", state)
+	}
+
+	w = do(h, http.MethodGet, "/api/accounts?pageSize=10", "", nil)
+	if !strings.Contains(w.Body.String(), `"sync_enabled":false`) {
+		t.Fatalf("列表未反映暂停状态: %s", w.Body.String())
+	}
+
+	do(h, http.MethodPost, "/api/accounts/batch-toggle-sync", `{"ids":[1],"enabled":true}`, nil)
+	state, _ = ops.GetSyncState(st.DB(), 1)
+	if state == nil || !state.Enabled() {
+		t.Fatalf("应已启用同步: %+v", state)
 	}
 }

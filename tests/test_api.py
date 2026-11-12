@@ -101,3 +101,61 @@ def test_credential_export_is_encrypted_with_password(client):
     body = resp.text
     assert "encrypted" in resp.json()
     assert "ghp_secret2" not in body
+
+
+def test_dashboard_tasks_filter_params(client):
+    from app import db
+
+    bad = config.add_account("坏号", "bad", "ghp_bad")
+    db.upsert_summary(bad["id"], "bad", {"status": "invalid", "label": "坏号", "error": "Token 无效"})
+    db.upsert_sync_state(bad["id"], "bad", last_status="invalid")
+    good = config.add_account("好号", "good", "ghp_good")
+    db.upsert_summary(good["id"], "good", {"status": "active", "label": "好号", "review_prs_count": 3})
+    db.upsert_sync_state(good["id"], "good", last_status="active")
+
+    r = client.get("/api/dashboard/tasks?priority=high")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert r.json()["tasks"][0]["type"] == "credential"
+
+    r = client.get("/api/dashboard/tasks?type=review_pr")
+    assert r.json()["total"] == 1
+    assert r.json()["tasks"][0]["account_label"] == "好号"
+
+    r = client.get(f"/api/dashboard/tasks?accountId={good['id']}")
+    assert r.json()["total"] == 1
+    assert r.json()["tasks"][0]["account_id"] == good["id"]
+
+    assert client.get("/api/dashboard/tasks").json()["total"] == 2
+
+
+def test_batch_operations(client):
+    from app import db
+
+    a1 = config.add_account("A", "batch-u1", "ghp_1", group="工作")
+    a2 = config.add_account("B", "batch-u2", "ghp_2", group="个人")
+    ids = [a1["id"], a2["id"]]
+
+    # 刻意不预先创建 sync_state：暂停操作应自建状态行
+    r = client.post("/api/accounts/batch-toggle-sync", json={"ids": ids, "enabled": False})
+    assert r.status_code == 200 and r.json()["updated"] == 2
+    for aid in ids:
+        state = db.get_sync_state(aid)
+        assert state is not None and state["sync_enabled"] == 0
+
+    r = client.post("/api/accounts/batch-tag", json={"ids": ids, "tags": ["核心", "ci"]})
+    assert r.status_code == 200 and r.json()["updated"] == 2
+    for acc in config.load_accounts():
+        assert set(acc["tags"]) == {"核心", "ci"}
+
+    r = client.post("/api/accounts/batch-group", json={"ids": ids, "group": "测试"})
+    assert r.status_code == 200 and r.json()["updated"] == 2
+    assert all(acc["group"] == "测试" for acc in config.load_accounts())
+
+    # 幂等：重复打标签不应重复
+    client.post("/api/accounts/batch-tag", json={"ids": [a1["id"]], "tags": ["核心"]})
+    assert set(config.load_accounts()[0]["tags"]) == {"核心", "ci"}
+
+    assert client.post("/api/accounts/batch-tag", json={"ids": ids, "tags": []}).status_code == 400
+    assert client.post("/api/accounts/batch-group", json={"ids": ids, "group": ""}).status_code == 400
+    assert client.post("/api/accounts/batch-toggle-sync", json={"ids": []}).status_code == 400

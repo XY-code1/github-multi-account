@@ -210,14 +210,18 @@ func upsertMetaLocked(db *sql.DB, m Meta) error {
 }
 
 // SetSyncEnabled 启用 / 暂停某账号的同步。
-func SetSyncEnabled(db *sql.DB, id int, enabled bool) error {
+// 账号从未同步过（sync_state 里没有行）时也会创建状态行，否则暂停操作会静默失效。
+func SetSyncEnabled(db *sql.DB, id int, username string, enabled bool) error {
 	mu.Lock()
 	defer mu.Unlock()
 	v := 0
 	if enabled {
 		v = 1
 	}
-	_, err := db.Exec(`UPDATE sync_state SET sync_enabled=?, updated_at=? WHERE account_id=?`, v, now(), id)
+	_, err := db.Exec(`
+		INSERT INTO sync_state (account_id, username, sync_enabled, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(account_id) DO UPDATE SET sync_enabled=excluded.sync_enabled, updated_at=excluded.updated_at
+	`, id, username, v, now())
 	return err
 }
 

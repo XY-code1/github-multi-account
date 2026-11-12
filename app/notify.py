@@ -18,39 +18,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 import yaml
 
+from . import config
+
 logger = logging.getLogger(__name__)
 
 CHANNEL_TYPES = ("bark", "webhook", "serverchan", "wecom")
 
-CONFIG_DIR = Path(os.getenv("GAD_CONFIG_DIR", Path(__file__).resolve().parent.parent / "config"))
-SETTINGS_FILE = CONFIG_DIR / "settings.yaml"
-
 
 def load_channels() -> list[dict[str, Any]]:
-    if not SETTINGS_FILE.exists():
-        return []
     try:
-        data = yaml.safe_load(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
-    except Exception:
+        data = yaml.safe_load(
+            (config.CONFIG_DIR / "settings.yaml").read_text(encoding="utf-8")
+        ) or {}
+    except Exception:  # noqa: BLE001
         return []
     channels = data.get("channels") or []
     return [c for c in channels if isinstance(c, dict)]
 
 
 def save_channels(channels: list[dict[str, Any]]) -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"channels": channels}
-    SETTINGS_FILE.write_text(
-        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
+    # 合并写：settings.yaml 里还有同步设置，不能整份覆盖
+    from . import config
+
+    data = config.read_settings()
+    data["channels"] = channels
+    config.write_settings(data)
 
 
 async def _post_json(url: str, body: dict[str, Any]) -> None:

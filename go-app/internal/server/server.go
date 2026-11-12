@@ -18,7 +18,7 @@ import (
 )
 
 // Version 是当前程序版本（构建时可覆盖）。
-var Version = "1.1.0"
+var Version = "1.3.0"
 
 // Server 是 HTTP 服务。
 type Server struct {
@@ -93,6 +93,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/dashboard/tasks", s.handleDashboardTasks)
 	s.mux.HandleFunc("GET /api/dashboard/activities", s.handleDashboardActivities)
 	s.mux.HandleFunc("POST /api/accounts/batch-refresh", s.handleBatchRefresh)
+	s.mux.HandleFunc("POST /api/accounts/batch-toggle-sync", s.handleBatchToggleSync)
+	s.mux.HandleFunc("POST /api/accounts/batch-tag", s.handleBatchTag)
+	s.mux.HandleFunc("POST /api/accounts/batch-group", s.handleBatchGroup)
 	s.mux.HandleFunc("POST /api/accounts/{id}/sync", s.handleSyncAccount)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("POST /api/sync/settings", s.handleSyncSettings)

@@ -179,6 +179,20 @@ a:hover { text-decoration: underline; }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-icon { width: 15px; text-align: center; }
 
+.count-badge {
+  min-width: 17px;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+}
+.count-badge.hidden { display: none; }
+
 .side-section { margin-top: 20px; }
 .side-section h3 {
   font-size: 11px;
@@ -474,6 +488,9 @@ a:hover { text-decoration: underline; }
 .detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .detail-head h2 { font-size: 18px; font-weight: 600; }
 .detail-head .spacer { flex: 1; }
+.detail-id { min-width: 0; }
+.detail-id h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-id .page-desc { margin: 3px 0 0; }
 
 .avatar { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); }
 

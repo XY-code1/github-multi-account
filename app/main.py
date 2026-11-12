@@ -193,7 +193,7 @@ async def verify_account(account_id: int) -> dict[str, Any]:
 async def version() -> dict[str, Any]:
     """当前程序版本与仓库地址。"""
     return {
-        "version": "1.1.0",
+        "version": "1.3.0",
         "repo": "https://github.com/XY-code1/github-multi-account",
     }
 
@@ -214,9 +214,20 @@ async def dashboard_summary() -> dict[str, Any]:
 
 
 @app.get("/api/dashboard/tasks")
-async def dashboard_tasks() -> dict[str, Any]:
-    """统一待办（按优先级排序）。"""
+async def dashboard_tasks(priority: str = "", type: str = "", accountId: str = "") -> dict[str, Any]:
+    """统一待办（按优先级排序，支持按优先级 / 类型 / 账号筛选）。"""
     tasks = dashboard.build_tasks()
+    if priority:
+        tasks = [t for t in tasks if t["priority"] == priority]
+    if type:
+        tasks = [t for t in tasks if t["type"] == type]
+    if accountId:
+        try:
+            aid = int(accountId)
+        except ValueError:
+            aid = None
+        if aid is not None:
+            tasks = [t for t in tasks if t["account_id"] == aid]
     return {
         "tasks": tasks,
         "total": len(tasks),
@@ -268,6 +279,75 @@ async def batch_refresh(payload: dict[str, Any]) -> dict[str, Any]:
     db.audit("accounts.batch_refresh", detail=f"批量刷新 {len(ids)} 个账号")
     result = await sync_engine.sync_all(only_ids=[int(i) for i in ids])
     return {"ok": True, **result}
+
+
+@app.post("/api/accounts/batch-toggle-sync")
+async def batch_toggle_sync(payload: dict[str, Any]) -> dict[str, Any]:
+    """批量启用 / 暂停账号同步。"""
+    ids = payload.get("ids") or []
+    enabled = bool(payload.get("enabled", True))
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 必须是非空列表")
+    accounts = {a["id"]: a for a in config.load_accounts()}
+    for aid in ids:
+        aid = int(aid)
+        db.set_sync_enabled(aid, enabled, accounts.get(aid, {}).get("username"))
+    db.audit(
+        "accounts.batch_toggle_sync",
+        detail=f"批量{'启用' if enabled else '暂停'} {len(ids)} 个账号的同步",
+    )
+    return {"ok": True, "updated": len(ids)}
+
+
+@app.post("/api/accounts/batch-tag")
+async def batch_tag(payload: dict[str, Any]) -> dict[str, Any]:
+    """批量给账号追加标签。"""
+    ids = payload.get("ids") or []
+    tags = payload.get("tags") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 必须是非空列表")
+    clean = [t.strip() for t in tags if isinstance(t, str) and t.strip()]
+    if not clean:
+        raise HTTPException(status_code=400, detail="tags 必须是非空列表")
+    wanted = {int(i) for i in ids}
+    accounts = config.load_accounts()
+    changed = 0
+    for acc in accounts:
+        if acc["id"] in wanted:
+            merged = list(acc.get("tags") or [])
+            for t in clean:
+                if t not in merged:
+                    merged.append(t)
+            acc["tags"] = merged
+            changed += 1
+    if changed:
+        config.save_accounts(accounts)
+        db.rebuild_meta(config.load_accounts())
+    db.audit("accounts.batch_tag", detail=f"批量打标签 {changed} 个账号：{', '.join(clean)}")
+    return {"ok": True, "updated": changed}
+
+
+@app.post("/api/accounts/batch-group")
+async def batch_group(payload: dict[str, Any]) -> dict[str, Any]:
+    """批量把账号移动到指定分组。"""
+    ids = payload.get("ids") or []
+    group = str(payload.get("group", "")).strip()
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 必须是非空列表")
+    if not group:
+        raise HTTPException(status_code=400, detail="group 不能为空")
+    wanted = {int(i) for i in ids}
+    accounts = config.load_accounts()
+    changed = 0
+    for acc in accounts:
+        if acc["id"] in wanted:
+            acc["group"] = group
+            changed += 1
+    if changed:
+        config.save_accounts(accounts)
+        db.rebuild_meta(config.load_accounts())
+    db.audit("accounts.batch_group", detail=f"批量移动到分组「{group}」：{changed} 个账号")
+    return {"ok": True, "updated": changed}
 
 
 @app.post("/api/accounts/{account_id}/sync")
