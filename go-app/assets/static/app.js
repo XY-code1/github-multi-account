@@ -507,6 +507,114 @@ async function batchGroup() {
   }
 }
 
+// ---------------- Word 导入 ----------------
+
+let docxFile = null;
+
+// 上传 .docx：preview=true 只解析并返回候选，preview=false 按 indices 写入
+async function uploadDocx(file, preview, indices, overrides) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const params = new URLSearchParams();
+  params.set("preview", preview ? "true" : "false");
+  if (indices && indices.length) params.set("indices", indices.join(","));
+  if (overrides && Object.keys(overrides).length) fd.append("overrides", JSON.stringify(overrides));
+  const resp = await fetch(`/api/accounts/import-docx?${params.toString()}`, { method: "POST", body: fd });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.detail || `上传失败（${resp.status}）`);
+  return data;
+}
+
+async function handleDocxFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".docx")) {
+    showToast("请选择 .docx 文件");
+    return;
+  }
+  docxFile = file;
+  const box = document.getElementById("docxPreview");
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="empty-tab">正在解析文档…</div>`;
+  try {
+    const data = await uploadDocx(file, true);
+    if (!data.candidates.length) {
+      box.innerHTML = `<div class="empty-tab">${escapeHtml(data.message || "没有在文档里找到 GitHub Token")}</div>`;
+      return;
+    }
+    renderDocxPreview(data.candidates);
+  } catch (err) {
+    box.innerHTML = `<div class="empty-tab">解析失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderDocxPreview(candidates) {
+  const box = document.getElementById("docxPreview");
+  const rows = candidates.map((c) => `
+    <tr data-index="${c.index}" class="${c.valid ? "" : "row-invalid"}">
+      <td class="col-check"><input type="checkbox" class="docx-check" data-index="${c.index}" ${c.valid ? "checked" : ""}></td>
+      <td><input class="input-sm docx-username" data-index="${c.index}" value="${escapeHtml(c.username)}" placeholder="GitHub 用户名"></td>
+      <td><input class="input-sm docx-label" data-index="${c.index}" value="${escapeHtml(c.label)}" placeholder="显示名称"></td>
+      <td><code>${escapeHtml(c.token_masked)}</code></td>
+      <td>${c.valid ? '<span class="status-badge active">有效</span>' : '<span class="status-badge invalid">无效</span>'}</td>
+    </tr>`).join("");
+  box.innerHTML = `
+    <div class="table-wrap"><table class="data-table docx-table">
+      <thead><tr>
+        <th class="col-check"><input type="checkbox" id="docxCheckAll" checked></th>
+        <th>用户名</th><th>显示名称</th><th>Token</th><th>状态</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div class="docx-actions">
+      <span class="docx-summary" id="docxSummary"></span>
+      <span class="spacer"></span>
+      <button id="docxImportBtn" class="btn btn-primary">导入选中</button>
+    </div>`;
+  document.getElementById("docxCheckAll").addEventListener("change", (e) => {
+    box.querySelectorAll(".docx-check").forEach((cb) => { cb.checked = e.target.checked; });
+    updateDocxSummary();
+  });
+  box.querySelectorAll(".docx-check").forEach((cb) => cb.addEventListener("change", updateDocxSummary));
+  document.getElementById("docxImportBtn").addEventListener("click", importSelectedDocx);
+  updateDocxSummary();
+}
+
+function updateDocxSummary() {
+  const box = document.getElementById("docxPreview");
+  const total = box.querySelectorAll(".docx-check").length;
+  const checked = box.querySelectorAll(".docx-check:checked").length;
+  const el = document.getElementById("docxSummary");
+  if (el) el.textContent = `已识别 ${total} 个 Token，选中 ${checked} 个`;
+}
+
+async function importSelectedDocx() {
+  if (!docxFile) return;
+  const rows = document.querySelectorAll("#docxPreview tr[data-index]");
+  const indices = [];
+  const overrides = {};
+  rows.forEach((tr) => {
+    const cb = tr.querySelector(".docx-check");
+    if (!cb.checked) return;
+    const idx = Number(cb.dataset.index);
+    indices.push(idx);
+    overrides[idx] = {
+      username: tr.querySelector(".docx-username").value.trim(),
+      label: tr.querySelector(".docx-label").value.trim(),
+    };
+  });
+  if (!indices.length) { showToast("请先勾选要导入的账号"); return; }
+  try {
+    const data = await uploadDocx(docxFile, false, indices, overrides);
+    showToast(`导入完成：新增 ${data.added}，更新 ${data.updated}${data.skipped ? `，跳过 ${data.skipped}` : ""}`);
+    closeModal();
+    await loadAccountsPage(false);
+    await loadOverview();
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
 // ---------------- 统一待办 ----------------
 
 async function loadTodos() {
@@ -957,6 +1065,12 @@ function closeModal() {
   ["fLabel", "fUsername", "fGroup", "fTags", "fNote", "fToken"].forEach((id) => (document.getElementById(id).value = ""));
   document.getElementById("fType").value = "personal";
   document.getElementById("testResult").textContent = "";
+  // 重置 Word 导入
+  const preview = document.getElementById("docxPreview");
+  preview.classList.add("hidden");
+  preview.innerHTML = "";
+  document.getElementById("docxFile").value = "";
+  docxFile = null;
 }
 
 async function testConnection() {
@@ -1282,6 +1396,7 @@ function bindEvents() {
   document.getElementById("cancelBtn").addEventListener("click", closeModal);
   document.getElementById("saveBtn").addEventListener("click", saveAccount);
   document.getElementById("testBtn").addEventListener("click", testConnection);
+  document.getElementById("docxFile").addEventListener("change", handleDocxFile);
   document.getElementById("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
 
   document.getElementById("exportBtn").addEventListener("click", exportBackup);

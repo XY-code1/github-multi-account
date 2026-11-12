@@ -9,17 +9,19 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, dashboard, db, notify, service, store, sync
+from . import config, dashboard, db, docx, notify, service, store, sync
 from .query import query_accounts
 
 logger = logging.getLogger("ghdashboard")
@@ -348,6 +350,108 @@ async def batch_group(payload: dict[str, Any]) -> dict[str, Any]:
         db.rebuild_meta(config.load_accounts())
     db.audit("accounts.batch_group", detail=f"批量移动到分组「{group}」：{changed} 个账号")
     return {"ok": True, "updated": changed}
+
+
+def _select_candidates(candidates: list[docx.Candidate], indices: str) -> list[docx.Candidate]:
+    if not indices.strip():
+        return []
+    try:
+        want = {int(x) for x in indices.split(",") if x.strip() != ""}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="indices 格式不正确，应为逗号分隔的数字")
+    return [c for c in candidates if c.index in want]
+
+
+def _parse_overrides(raw: str) -> dict[int, dict[str, str]]:
+    try:
+        data = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[int, dict[str, str]] = {}
+    for k, v in data.items():
+        if isinstance(v, dict):
+            try:
+                out[int(k)] = {
+                    "username": str(v.get("username", "")),
+                    "label": str(v.get("label", "")),
+                }
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+async def _verify_candidates(candidates: list[docx.Candidate]) -> list[docx.Candidate]:
+    """并发验证 Token（并发上限 5），用 GitHub 返回的 login 作为权威用户名。"""
+    sem = asyncio.Semaphore(5)
+
+    async def one(c: docx.Candidate) -> docx.Candidate:
+        async with sem:
+            try:
+                status, user, msg = await service.verify_token(c.username, c.token)
+            except Exception as e:  # noqa: BLE001
+                c.valid, c.error = False, str(e)
+                return c
+            if status == "active" and user:
+                login = user.get("login") or c.username
+                c.username = login
+                c.label = c.label or login
+                c.valid, c.error = True, ""
+            else:
+                c.valid, c.error = False, msg
+            return c
+
+    return list(await asyncio.gather(*(one(c) for c in candidates)))
+
+
+@app.post("/api/accounts/import-docx")
+async def import_docx(
+    file: UploadFile = File(...),
+    preview: bool = Query(False, description="true=仅预览不写库"),
+    indices: str = Query("", description="要导入的候选序号（逗号分隔）"),
+    overrides: str = Form("{}", description="前端编辑的用户名 / 显示名覆盖"),
+) -> dict[str, Any]:
+    """上传 .docx，识别 Token 与用户名；preview=true 只返回预览。
+
+    Token 只在服务端使用，响应里只回脱敏值。
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="文件为空")
+    found = docx.find_candidates(data)
+    if not found:
+        return {"candidates": [], "total": 0, "message": "没有在文档里找到 GitHub Token"}
+    candidates = docx.build_candidates(found, config.mask_token)
+
+    targets = candidates if preview else _select_candidates(candidates, indices)
+    verified = await _verify_candidates(targets)
+    if preview:
+        return {"candidates": [c.to_dict() for c in verified], "total": len(verified), "message": ""}
+
+    ov = _parse_overrides(overrides)
+    existing = {a["username"] for a in config.load_accounts()}
+    added = updated = skipped = 0
+    accounts: list[dict[str, Any]] = []
+    for c in verified:
+        username = c.username or ov.get(c.index, {}).get("username", "")
+        label = ov.get(c.index, {}).get("label") or c.label or username
+        if not username or not c.token:
+            skipped += 1
+            continue
+        if username in existing:
+            updated += 1
+        else:
+            added += 1
+        acc = config.add_account(label, username, c.token, "", type_="personal")
+        accounts.append({
+            "id": acc["id"],
+            "username": acc["username"],
+            "label": acc["label"],
+            "token_masked": config.mask_token(acc["token"]),
+        })
+    db.audit("accounts.import_docx", detail=f"从 Word 导入：新增 {added}，更新 {updated}，跳过 {skipped}")
+    return {"ok": True, "added": added, "updated": updated, "skipped": skipped, "accounts": accounts}
 
 
 @app.post("/api/accounts/{account_id}/sync")

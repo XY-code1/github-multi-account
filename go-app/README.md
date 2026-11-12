@@ -57,6 +57,7 @@ config\.secret.key        （本机密钥，必须一起复制）
 - 审计日志：账号与凭据的增删改、批量操作、同步设置变更全部留痕
 - Token 加密存储（Fernet，与 Python 版兼容）
 - 账号信息备份与凭据备份分离：默认导出不含 Token，凭据导出可选密码加密
+- Word 文档导入：上传 .docx 自动识别 Token 与用户名，验证后预览并批量导入
 - 备份导出支持可选密码加密（PBKDF2 + AES-GCM，与 Python 版互通）
 - 历史快照 + 趋势图 + CSV 导出
 - 账号对比、账号分组、全局搜索（Ctrl+K）、列表过滤
@@ -118,6 +119,7 @@ go-app/
 │   ├── config/             账号配置、Fernet 加解密、导入导出、缓存
 │   ├── github/             GitHub REST API 客户端
 │   ├── service/            汇总 / 详情聚合、容错、并发限流
+│   ├── docx/               从 .docx 识别 GitHub Token 与用户名
 │   ├── ops/                运维中心：同步状态 / 配额 / 审计 / 元数据、后台同步引擎、全局聚合
 │   ├── store/              SQLite 历史快照
 │   └── server/             HTTP 路由、CSRF 防护、静态资源

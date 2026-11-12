@@ -1,8 +1,10 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +16,54 @@ import (
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
 )
+
+func buildDocx(t *testing.T, lines []string) []byte {
+	t.Helper()
+	const xmlHeader = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`
+	const xmlFooter = `</w:body></w:document>`
+	var sb strings.Builder
+	for _, line := range lines {
+		sb.WriteString(`<w:p><w:r><w:t>` + line + `</w:t></w:r></w:p>`)
+	}
+	raw := xmlHeader + sb.String() + xmlFooter
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("word/document.xml")
+	if err != nil {
+		t.Fatalf("创建 docx 条目失败: %v", err)
+	}
+	if _, err := w.Write([]byte(raw)); err != nil {
+		t.Fatalf("写入 docx 失败: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("关闭 docx 失败: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func multipartBody(t *testing.T, file []byte, fields map[string]string) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "accounts.docx")
+	if err != nil {
+		t.Fatalf("创建表单文件失败: %v", err)
+	}
+	if _, err := fw.Write(file); err != nil {
+		t.Fatalf("写入表单文件失败: %v", err)
+	}
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatalf("写入表单字段失败: %v", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("关闭 multipart 失败: %v", err)
+	}
+	return buf.Bytes(), mw.FormDataContentType()
+}
 
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
@@ -266,5 +316,55 @@ func TestBatchToggleSync(t *testing.T) {
 	state, _ = ops.GetSyncState(st.DB(), 1)
 	if state == nil || !state.Enabled() {
 		t.Fatalf("应已启用同步: %+v", state)
+	}
+}
+
+func TestImportDocx(t *testing.T) {
+	h, cfg, _ := newTestEnv(t)
+	doc := buildDocx(t, []string{
+		"账号：alice",
+		"ghp_" + strings.Repeat("a", 36),
+	})
+
+	// 预览：只回脱敏 Token，且不得泄露明文
+	body, ctype := multipartBody(t, doc, nil)
+	w := do(h, http.MethodPost, "/api/accounts/import-docx?preview=true", string(body), map[string]string{
+		"Content-Type": ctype,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("预览失败: %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), strings.Repeat("a", 36)) {
+		t.Fatal("预览响应泄露了明文 Token")
+	}
+	var preview struct {
+		Total      int `json:"total"`
+		Candidates []struct {
+			Index       int    `json:"index"`
+			Username    string `json:"username"`
+			TokenMasked string `json:"token_masked"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("解析预览响应失败: %v", err)
+	}
+	if preview.Total != 1 || preview.Candidates[0].Username != "alice" {
+		t.Fatalf("预览结果不正确: %+v", preview)
+	}
+
+	// 导入：带显示名覆盖（Token 无效也允许显式导入）
+	body, ctype = multipartBody(t, doc, map[string]string{"overrides": `{"0":{"label":"工作号"}}`})
+	w = do(h, http.MethodPost, "/api/accounts/import-docx?preview=false&indices=0", string(body), map[string]string{
+		"Content-Type": ctype,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("导入失败: %d %s", w.Code, w.Body.String())
+	}
+	accounts, _ := cfg.Accounts()
+	if len(accounts) != 1 {
+		t.Fatalf("应导入 1 个账号: %+v", accounts)
+	}
+	if accounts[0].Username != "alice" || accounts[0].Label != "工作号" {
+		t.Fatalf("导入的账号信息不正确: %+v", accounts[0])
 	}
 }

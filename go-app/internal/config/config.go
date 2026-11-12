@@ -38,6 +38,9 @@ func (a Account) MaskedToken() string {
 	return t[:4] + "********" + t[len(t)-4:]
 }
 
+// MaskToken 返回脱敏 Token（用于导入等场景）。
+func MaskToken(token string) string { return Account{Token: token}.MaskedToken() }
+
 // Normalize 补全类型与标签默认值。
 func (a *Account) Normalize() {
 	if a.Type != "bot" && a.Type != "org" {

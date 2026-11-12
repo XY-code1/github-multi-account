@@ -81,6 +81,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/accounts/export", s.handleExport)
 	s.mux.HandleFunc("POST /api/accounts/export", s.handleExportPost)
 	s.mux.HandleFunc("POST /api/accounts/import", s.handleImport)
+	s.mux.HandleFunc("POST /api/accounts/import-docx", s.handleImportDocx)
 	s.mux.HandleFunc("GET /api/history/{id}", s.handleHistory)
 	s.mux.HandleFunc("POST /api/snapshot/{id}", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)

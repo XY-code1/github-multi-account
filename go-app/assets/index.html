@@ -286,6 +286,14 @@
       <label class="field"><span>备注（可选）</span><input id="fNote" type="text"></label>
       <label class="field"><span>Personal Access Token</span><input id="fToken" type="password" autocomplete="off"></label>
       <div id="testResult" class="test-result"></div>
+      <div class="import-docx">
+        <label class="btn btn-sm" for="docxFile">
+          <span class="btn-icon">▤</span> 从 Word 文档导入
+        </label>
+        <input id="docxFile" type="file" accept=".docx" class="hidden">
+        <p class="modal-hint">上传 .docx，自动识别文档里的 Token 与用户名。有效 Token 默认勾选，无效的可手动勾选后导入。</p>
+        <div id="docxPreview" class="docx-preview hidden"></div>
+      </div>
       <div class="modal-actions">
         <button id="testBtn" class="btn">测试连接</button>
         <span class="spacer"></span>

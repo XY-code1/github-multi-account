@@ -26,6 +26,7 @@
 - **账号对比** —— 多账号指标并排对比，粉丝数条形图，一键加载各账号 Star
 - **历史趋势** —— 自动记录状态快照（10 分钟节流），折线图看粉丝 / Star / PR 变化，支持导出 CSV
 - **备份恢复** —— 导出 / 导入账号备份，支持**可选密码加密**（PBKDF2 + AES-GCM）
+- **Word 文档导入** —— 上传 `.docx` 自动识别 Token 与用户名，调 GitHub 验证后预览并批量导入
 - **变化提醒** —— 可选开启桌面通知，PR / Issue 增加时提醒
 - **账号搜索** —— 侧栏按显示名 / 用户名实时筛选账号，账号多时快速定位
 - **详情预取** —— 后台静默预取所有账号详情，任意切换秒开（可在顶栏关闭）
@@ -126,22 +127,26 @@ accounts:
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/accounts` | 账号列表（脱敏） |
+| GET | `/api/accounts` | 账号列表（脱敏），支持 `page/pageSize/query/status/type/group/tags/sort/order` |
 | POST | `/api/accounts` | 新增/更新账号 |
 | DELETE | `/api/accounts/{id}` | 删除账号 |
-| POST | `/api/verify` | 测试 Token 有效性（不保存） |
-| GET | `/api/status` | 全部账号汇总（轻量，侧栏用） |
-| GET | `/api/status/{id}` | 单个账号完整详情 |
-| GET | `/api/accounts/export` | 导出账号备份（含明文 Token） |
-| POST | `/api/accounts/import` | 从备份导入账号 |
-| GET | `/api/history/{id}` | 账号历史快照（时间升序） |
-| GET | `/api/snapshot/{id}` | 立即记录一条快照 |
-| GET | `/api/dashboard/summary` | 全局账号总览 |
-| GET | `/api/dashboard/tasks` | 统一待办（按优先级排序） |
-| GET | `/api/dashboard/activities` | 跨账号最近动态 |
-| GET | `/api/accounts` | 账号列表，支持 `page/pageSize/query/status/type/group/tags/sort/order` |
 | POST | `/api/accounts/batch-refresh` | 批量刷新 |
+| POST | `/api/accounts/batch-toggle-sync` | 批量启用 / 暂停同步 |
+| POST | `/api/accounts/batch-tag` | 批量打标签 |
+| POST | `/api/accounts/batch-group` | 批量移动分组 |
 | POST | `/api/accounts/{id}/sync` | 立即同步单个账号 |
+| POST | `/api/verify` | 测试 Token 有效性（不保存） |
+| GET | `/api/status` | 全部账号汇总（轻量） |
+| GET | `/api/status/{id}` | 单个账号完整详情 |
+| GET | `/api/accounts/export` | 导出账号信息备份（**不含 Token**） |
+| POST | `/api/accounts/export` | 导出凭据备份（含 Token，可加密） |
+| POST | `/api/accounts/import` | 从备份导入账号 |
+| POST | `/api/accounts/import-docx` | 上传 .docx 识别 Token / 用户名（`preview=true` 只预览） |
+| GET | `/api/history/{id}` | 账号历史快照（时间升序） |
+| POST | `/api/snapshot/{id}` | 立即记录一条快照 |
+| GET | `/api/dashboard/summary` | 全局账号总览 |
+| GET | `/api/dashboard/tasks` | 统一待办（支持 `priority/type/accountId` 筛选） |
+| GET | `/api/dashboard/activities` | 跨账号最近动态（重复活动已聚合） |
 | GET | `/api/tasks` | 同步引擎进度与配置 |
 | POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 |
 | POST | `/api/sync/run` | 立即触发全量同步 |
@@ -176,6 +181,7 @@ python -m pytest          # 运行测试套件
 | `app/dashboard.py` | 全局聚合（总览 / 统一待办 / 最近活动） |
 | `app/query.py` | 账号列表服务端查询（分页 / 搜索 / 筛选 / 排序） |
 | `app/notify.py` | 外部通知渠道（Bark / Server酱 / 企业微信 / Webhook） |
+| `app/docx.py` | 从 .docx 识别 GitHub Token 与用户名（解压 + XML 解析） |
 | `static/app.js` | 前端全部逻辑 |
 | `find_port.py` | Windows 端口保留段探测 |
 | `Start-Hidden.vbs` | 无控制台窗口启动（双击运行） |

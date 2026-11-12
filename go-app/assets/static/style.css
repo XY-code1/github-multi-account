@@ -239,6 +239,36 @@ a:hover { text-decoration: underline; }
 .tag.is-danger { background: var(--danger-soft); color: var(--danger); }
 .tag.is-warning { background: var(--warning-soft); color: var(--warning); }
 
+/* ---------------- Word 导入 ---------------- */
+
+.import-docx {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-muted);
+}
+.import-docx .modal-hint { margin: 6px 0 0; }
+.docx-preview { margin-top: 10px; }
+.docx-preview.hidden { display: none; }
+.docx-table { width: 100%; font-size: 12px; }
+.docx-table .input-sm {
+  width: 100%;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+}
+.docx-table .input-sm:focus { outline: none; border-color: var(--accent); }
+.docx-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.docx-summary { font-size: 12px; color: var(--text-faint); }
+
 /* ---------------- 按钮 ---------------- */
 
 .btn {
