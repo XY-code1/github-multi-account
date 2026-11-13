@@ -292,6 +292,28 @@ a:hover { text-decoration: underline; }
 /* ---------------- 社交（粉丝 / 关注） ---------------- */
 
 .panel-note { font-size: 11px; color: var(--text-faint); font-weight: 400; }
+
+/* ---------------- 出站 Webhook ---------------- */
+
+.webhook-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-muted);
+  font-size: 12px;
+}
+.webhook-row:last-child { border-bottom: 0; }
+.webhook-name { font-weight: 600; color: var(--text); }
+.webhook-url {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .person-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));

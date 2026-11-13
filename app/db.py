@@ -347,6 +347,29 @@ def all_rate_limits() -> dict[int, dict[str, Any]]:
     return {r["account_id"]: dict(r) for r in rows}
 
 
+# ------------------------------ 出站 Webhook 日志 ------------------------------
+
+def log_webhook(url: str, event_type: str, ok: bool, detail: str = "") -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO webhook_log (ts, url, event_type, ok, detail) VALUES (?,?,?,?,?)",
+            (ts, url, event_type, 1 if ok else 0, detail),
+        )
+
+
+def list_webhook_log(limit: int = 50) -> list[dict[str, Any]]:
+    if not DB_FILE.exists():
+        return []
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT ts, url, event_type, ok, detail FROM webhook_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ------------------------------ 增量同步 ETag ------------------------------
 
 def get_etag(account_id: int, endpoint: str) -> str | None:

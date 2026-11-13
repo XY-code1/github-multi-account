@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 
-from . import config, db, service
+from . import config, db, service, webhook
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,15 @@ class SyncEngine:
             except ValueError:
                 pass
 
+        # 同步前的旧状态（用于事件检测与 304 兜底）
+        previous = db.get_summary_dict(aid)
+        old_rl = db.all_rate_limits().get(aid)
+        was_capped = bool(
+            old_rl
+            and int(old_rl.get("quota_limit") or 0) > 0
+            and int(old_rl.get("remaining") or 0) <= db.QUOTA_CAP
+        )
+
         # 增量同步：带上各端点的 ETag，未变化（304）不消耗 API 配额
         etags = {
             key: value
@@ -211,7 +220,7 @@ class SyncEngine:
             acc,
             include_events=True,
             etags=etags,
-            previous=db.get_summary_dict(aid),
+            previous=previous,
         )
         for key, value in etags.items():
             db.put_etag(aid, key, value)
@@ -249,4 +258,54 @@ class SyncEngine:
                 None,
             )
         db.upsert_summary(aid, username, summary)
+
+        # 出站 Webhook：把本次同步检测到的变化推给外部系统
+        new_rl = db.all_rate_limits().get(aid)
+        now_capped = bool(
+            new_rl
+            and int(new_rl.get("quota_limit") or 0) > 0
+            and int(new_rl.get("remaining") or 0) <= db.QUOTA_CAP
+        )
+        for event_type, detail in _detect_events(previous, summary, was_capped, now_capped):
+            await webhook.dispatch(
+                event_type,
+                {
+                    "account": {
+                        "id": aid,
+                        "username": username,
+                        "label": summary.get("label") or acc.get("label"),
+                    },
+                    "detail": detail,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                },
+            )
         return {"id": aid, "ok": summary["status"] == "active", "status": summary["status"]}
+
+
+def _detect_events(
+    previous: dict[str, Any],
+    summary: dict[str, Any],
+    was_capped: bool,
+    now_capped: bool,
+) -> list[tuple[str, str]]:
+    """对比新旧汇总，返回 [(事件类型, 详情)]。"""
+    events: list[tuple[str, str]] = []
+    pairs = (
+        ("review_pr.added", "review_prs_count", "待 Review PR"),
+        ("my_pr.added", "my_prs_count", "我发起的 PR"),
+        ("issue.added", "assigned_issues_count", "分配 Issue"),
+    )
+    for event_type, key, label in pairs:
+        old_n = int(previous.get(key) or 0)
+        new_n = int(summary.get(key) or 0)
+        if new_n > old_n:
+            events.append((event_type, f"{label}从 {old_n} 增加到 {new_n}"))
+
+    status = summary.get("status")
+    if status in ("invalid", "error"):
+        events.append(("account.invalid", summary.get("error") or "凭据无效或已过期"))
+    elif status != "active":
+        events.append(("sync.failed", summary.get("error") or f"同步状态 {status}"))
+    if now_capped and not was_capped:
+        events.append(("account.capped", "API 已封顶（剩余 ≤ 60/小时）"))
+    return events

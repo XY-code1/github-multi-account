@@ -4,11 +4,14 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github-multi-account/internal/notify"
 	"github-multi-account/internal/ops"
 )
 
@@ -143,6 +146,46 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"webhooks": notify.LoadWebhooks(filepath.Join(s.baseDir, "config")),
+		"types":    notify.WebhookEventTypes,
+	})
+}
+
+func (s *Server) handleSaveWebhooks(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Webhooks []notify.Webhook `json:"webhooks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请求格式不正确"})
+		return
+	}
+	dir := filepath.Join(s.baseDir, "config")
+	if err := notify.SaveWebhooks(dir, in.Webhooks); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	ops.Audit(s.opsDB, "webhooks.settings", nil, "", fmt.Sprintf("更新出站 Webhook 配置：%d 条", len(in.Webhooks)))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "webhooks": in.Webhooks})
+}
+
+func (s *Server) handleWebhooksLog(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	items, err := ops.ListWebhookLog(s.opsDB, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 
 // RebuildMeta 从当前账号配置重建元数据镜像（搜索 / 筛选用）。

@@ -108,6 +108,8 @@ const state = {
   metric: "followers",
   prefetchEnabled: false,
   version: null,
+  webhooks: [],
+  webhookTypes: [],
 };
 
 // ---------------- 路由 ----------------
@@ -631,6 +633,85 @@ async function importSelectedDocx() {
   }
 }
 
+// ---------------- 出站 Webhook ----------------
+
+async function loadWebhooks() {
+  try {
+    const data = await api("/api/webhooks");
+    state.webhooks = data.webhooks || [];
+    state.webhookTypes = data.types || [];
+    renderWebhooks();
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function loadWebhookLog() {
+  try {
+    const data = await api("/api/webhooks/log?limit=20");
+    const box = document.getElementById("webhookLog");
+    box.innerHTML = data.items.length
+      ? `<div class="item-list">${data.items.map((it) => `
+          <div class="item">
+            <div class="item-body">
+              <div class="item-title" style="font-weight:500">${escapeHtml(it.event_type)}</div>
+              <div class="item-meta"><span class="tag">${escapeHtml(it.url)}</span>${it.detail ? `<span>${escapeHtml(it.detail)}</span>` : ""}</div>
+            </div>
+            <span class="item-time">${it.ok ? "成功" : "失败"} · ${relTime(it.ts)}</span>
+          </div>`).join("")}</div>`
+      : `<div class="empty-tab">暂无投递记录</div>`;
+  } catch (e) { /* 日志失败不影响主流程 */ }
+}
+
+function renderWebhooks() {
+  const box = document.getElementById("webhookList");
+  if (!state.webhooks.length) {
+    box.innerHTML = `<div class="empty-tab">还没有配置出站 Webhook</div>`;
+    return;
+  }
+  box.innerHTML = state.webhooks.map((h, i) => `
+    <div class="webhook-row">
+      <span class="webhook-name">${escapeHtml(h.name || "未命名")}</span>
+      <span class="webhook-url">${escapeHtml(h.url)}</span>
+      <span class="tag">${(h.events || []).length ? h.events.map(escapeHtml).join(", ") : "全部事件"}</span>
+      <label style="display:inline-flex;align-items:center;gap:4px;color:var(--text-muted)">
+        <input type="checkbox" data-webhook-enable="${i}" ${h.enabled ? "checked" : ""}> 启用
+      </label>
+      <button class="btn btn-sm" data-webhook-del="${i}">删除</button>
+    </div>`).join("");
+  box.querySelectorAll("[data-webhook-enable]").forEach((cb) =>
+    cb.addEventListener("change", async () => {
+      state.webhooks[Number(cb.dataset.webhookEnable)].enabled = cb.checked;
+      await saveWebhooks();
+    })
+  );
+  box.querySelectorAll("[data-webhook-del]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      state.webhooks.splice(Number(btn.dataset.webhookDel), 1);
+      await saveWebhooks();
+      renderWebhooks();
+    })
+  );
+}
+
+async function saveWebhooks() {
+  try {
+    await api("/api/webhooks", { method: "POST", body: JSON.stringify({ webhooks: state.webhooks }) });
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function addWebhook() {
+  const name = prompt("Webhook 名称", "");
+  if (name === null) return;
+  const url = prompt("推送 URL（POST JSON）", "");
+  if (!url || !url.trim()) { showToast("请填写 URL"); return; }
+  state.webhooks.push({ name: name.trim(), url: url.trim(), events: [], enabled: true });
+  await saveWebhooks();
+  renderWebhooks();
+}
+
 // ---------------- 全部同步 ----------------
 
 // 一键同步全部账号（与顶部「同步」相同），单账号的「同步」按钮保持不变
@@ -695,8 +776,7 @@ async function loadAutomation() {
     const [tasks, audit] = await Promise.all([
       api("/api/tasks"),
       api("/api/audit?limit=30"),
-    ]);
-    document.getElementById("automationSummary").innerHTML = `
+    ]);    document.getElementById("automationSummary").innerHTML = `
       <div class="stat-grid">
         <div class="stat-card"><span class="stat-num">${tasks.config.concurrency}</span><span class="stat-label">并发上限</span></div>
         <div class="stat-card"><span class="stat-num">${tasks.config.interval_seconds}s</span><span class="stat-label">同步间隔</span></div>
@@ -720,6 +800,8 @@ async function loadAutomation() {
   } catch (e) {
     document.getElementById("automationSummary").innerHTML = `<div class="empty-tab">加载失败：${escapeHtml(e.message)}</div>`;
   }
+  loadWebhooks();
+  loadWebhookLog();
 }
 
 // ---------------- 单账号详情 ----------------
@@ -1521,6 +1603,7 @@ function bindEvents() {
   document.getElementById("batchTag").addEventListener("click", batchTag);
   document.getElementById("batchGroup").addEventListener("click", batchGroup);
   document.getElementById("syncAllAccountsBtn").addEventListener("click", syncAllAccounts);
+  document.getElementById("webhookAddBtn").addEventListener("click", addWebhook);
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

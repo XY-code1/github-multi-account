@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, dashboard, db, docx, notify, service, store, sync
+from . import config, dashboard, db, docx, notify, service, store, sync, webhook
 from .query import query_accounts
 
 logger = logging.getLogger("ghdashboard")
@@ -526,6 +526,40 @@ async def run_sync_now() -> dict[str, Any]:
     result = await sync_engine.sync_all()
     db.audit("sync.run", detail="手动触发全量同步")
     return {"ok": True, **result}
+
+
+@app.get("/api/webhooks")
+async def get_webhooks() -> dict[str, Any]:
+    """出站 Webhook 配置与可用事件类型。"""
+    return {"webhooks": webhook.load_webhooks(), "types": list(webhook.EVENT_TYPES)}
+
+
+@app.post("/api/webhooks")
+async def save_webhooks(payload: dict[str, Any]) -> dict[str, Any]:
+    """保存出站 Webhook 配置。"""
+    hooks = payload.get("webhooks") or []
+    valid = []
+    for h in hooks:
+        if not isinstance(h, dict):
+            continue
+        events = h.get("events") or []
+        valid.append({
+            "name": str(h.get("name") or ""),
+            "url": str(h.get("url") or ""),
+            "events": [e for e in events if e in webhook.EVENT_TYPES],
+            "enabled": bool(h.get("enabled", True)),
+        })
+    webhook.save_webhooks(valid)
+    db.audit("webhooks.settings", detail=f"更新出站 Webhook 配置：{len(valid)} 条")
+    return {"ok": True, "webhooks": valid}
+
+
+@app.get("/api/webhooks/log")
+async def webhooks_log(limit: int = 50) -> dict[str, Any]:
+    """Webhook 投递日志。"""
+    limit = max(1, min(limit, 200))
+    items = db.list_webhook_log(limit)
+    return {"items": items, "total": len(items)}
 
 
 @app.get("/api/notifications/settings")

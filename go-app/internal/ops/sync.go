@@ -11,12 +11,14 @@ package ops
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/notify"
 	"github-multi-account/internal/service"
 )
 
@@ -388,6 +390,9 @@ func (e *Engine) SyncAccount(acc config.Account) (bool, string, string) {
 			etags[key] = v
 		}
 	}
+	// 同步前的旧状态（用于事件检测与 304 兜底）
+	prevMap := summaryPayloadMap(e.db, aid)
+	wasCapped := isCapped(rateLimitOf(e.db, aid))
 	var previous *service.Status
 	if row, err := GetSummary(e.db, aid); err == nil && row != nil && len(row.Payload) > 0 {
 		var p service.Status
@@ -481,7 +486,84 @@ func (e *Engine) SyncAccount(acc config.Account) (bool, string, string) {
 		Error:          st.Error,
 		SyncedAt:       ts,
 	})
+
+	// 出站 Webhook：把本次同步检测到的变化推给外部系统
+	for _, ev := range detectSyncEvents(prevMap, st, wasCapped, isCapped(rateLimitOf(e.db, aid))) {
+		payload := map[string]any{
+			"event": ev[0],
+			"account": map[string]any{
+				"id":       aid,
+				"username": acc.Username,
+				"label":    st.Label,
+			},
+			"detail": ev[1],
+			"ts":     ts,
+		}
+		for _, d := range notify.Dispatch(e.dir, ev[0], payload) {
+			LogWebhook(e.db, d.URL, d.EventType, d.OK, d.Detail)
+		}
+	}
 	return st.Status == "active", st.Status, ""
+}
+
+// summaryPayloadMap 返回汇总缓存的 payload（解析后的 map）。
+func summaryPayloadMap(db *sql.DB, id int) map[string]any {
+	row, err := GetSummary(db, id)
+	if err != nil || row == nil || len(row.Payload) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal(row.Payload, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+func rateLimitOf(db *sql.DB, id int) *RateLimit {
+	m, err := AllRateLimits(db)
+	if err != nil {
+		return nil
+	}
+	rl, ok := m[id]
+	if !ok {
+		return nil
+	}
+	return &rl
+}
+
+func isCapped(rl *RateLimit) bool {
+	return rl != nil && rl.QuotaLimit > 0 && rl.Remaining <= QuotaCap
+}
+
+// detectSyncEvents 对比新旧汇总，返回 [(事件类型, 详情)]。
+func detectSyncEvents(previous map[string]any, st *service.Status, wasCapped, nowCapped bool) [][2]string {
+	events := [][2]string{}
+	pairs := []struct {
+		eventType string
+		key       string
+		label     string
+		get       func() int
+	}{
+		{"review_pr.added", "review_prs_count", "待 Review PR", func() int { return st.ReviewPRsCount }},
+		{"my_pr.added", "my_prs_count", "我发起的 PR", func() int { return st.MyPRsCount }},
+		{"issue.added", "assigned_issues_count", "分配 Issue", func() int { return st.AssignedIssuesCount }},
+	}
+	for _, p := range pairs {
+		oldN := toInt(previous[p.key])
+		newN := p.get()
+		if newN > oldN {
+			events = append(events, [2]string{p.eventType, fmt.Sprintf("%s从 %d 增加到 %d", p.label, oldN, newN)})
+		}
+	}
+	if st.Status == "invalid" || st.Status == "error" {
+		events = append(events, [2]string{"account.invalid", orString(st.Error, "凭据无效或已过期")})
+	} else if st.Status != "active" {
+		events = append(events, [2]string{"sync.failed", orString(st.Error, "同步状态 "+st.Status)})
+	}
+	if nowCapped && !wasCapped {
+		events = append(events, [2]string{"account.capped", "API 已封顶（剩余 ≤ 60/小时）"})
+	}
+	return events
 }
 
 func toInt(v any) int {

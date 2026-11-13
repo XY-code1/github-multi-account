@@ -314,6 +314,48 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 }
 
+func TestDetectSyncEvents(t *testing.T) {
+	prev := map[string]any{"review_prs_count": float64(2), "my_prs_count": float64(0)}
+	st := &service.Status{Status: "active", ReviewPRsCount: 3, MyPRsCount: 1}
+
+	events := detectSyncEvents(prev, st, false, false)
+	types := []string{}
+	for _, e := range events {
+		types = append(types, e[0])
+	}
+	if !containsString(types, "review_pr.added") || !containsString(types, "my_pr.added") {
+		t.Fatalf("应检测数量增加: %+v", types)
+	}
+	if containsString(types, "account.invalid") || containsString(types, "sync.failed") {
+		t.Fatalf("正常账号不应产生异常事件: %+v", types)
+	}
+
+	events = detectSyncEvents(nil, &service.Status{Status: "invalid", Error: "Token 无效"}, false, false)
+	if len(events) != 1 || events[0][0] != "account.invalid" {
+		t.Fatalf("凭据失效事件不正确: %+v", events)
+	}
+
+	events = detectSyncEvents(nil, &service.Status{Status: "active"}, false, true)
+	if !containsString(func() []string {
+		out := []string{}
+		for _, e := range events {
+			out = append(out, e[0])
+		}
+		return out
+	}(), "account.capped") {
+		t.Fatalf("封顶事件未检测: %+v", events)
+	}
+}
+
+func containsString(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildTasksCrossAccount(t *testing.T) {
 	cfg, cleanup := newTestEnv(t)
 	defer cleanup()

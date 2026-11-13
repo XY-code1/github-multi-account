@@ -458,6 +458,55 @@ func ListAudit(db *sql.DB, limit int, action string) ([]AuditItem, error) {
 	return out, rows.Err()
 }
 
+// ---------------- 出站 Webhook 日志 ----------------
+
+// WebhookLogItem 是一条 Webhook 投递记录。
+type WebhookLogItem struct {
+	TS        string `json:"ts"`
+	URL       string `json:"url"`
+	EventType string `json:"event_type"`
+	OK        bool   `json:"ok"`
+	Detail    string `json:"detail"`
+}
+
+// LogWebhook 记录一次 Webhook 投递。
+func LogWebhook(db *sql.DB, url, eventType string, ok bool, detail string) {
+	mu.Lock()
+	defer mu.Unlock()
+	v := 0
+	if ok {
+		v = 1
+	}
+	_, _ = db.Exec(`INSERT INTO webhook_log (ts, url, event_type, ok, detail) VALUES (?,?,?,?,?)`,
+		now(), url, eventType, v, detail)
+}
+
+// ListWebhookLog 返回 Webhook 投递日志（新的在前）。
+func ListWebhookLog(db *sql.DB, limit int) ([]WebhookLogItem, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	rows, err := db.Query(`SELECT ts, url, event_type, ok, detail FROM webhook_log ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []WebhookLogItem{}
+	for rows.Next() {
+		var (
+			item WebhookLogItem
+			ok   int
+			det  sql.NullString
+		)
+		if err := rows.Scan(&item.TS, &item.URL, &item.EventType, &ok, &det); err != nil {
+			return nil, err
+		}
+		item.OK = ok == 1
+		item.Detail = det.String
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // ---------------- 增量同步 ETag ----------------
 
 // GetETag 返回某账号某端点缓存的 ETag（无则空字符串）。

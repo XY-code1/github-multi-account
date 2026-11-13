@@ -102,6 +102,27 @@ def test_quota_capped_summary_and_task(populated):
     assert not [t for t in tasks if t["type"] == "quota" and t["account_id"] == 2]
 
 
+def test_detect_events(populated):
+    """同步后的事件检测：数量增加 / 凭据失效 / 封顶。"""
+    previous = {"review_prs_count": 2, "my_prs_count": 0, "assigned_issues_count": 0}
+    summary = {
+        "status": "active", "review_prs_count": 3, "my_prs_count": 1,
+        "assigned_issues_count": 0, "error": None,
+    }
+    events = sync._detect_events(previous, summary, False, False)
+    types = [e[0] for e in events]
+    assert "review_pr.added" in types
+    assert "my_pr.added" in types
+    assert "account.invalid" not in types
+    assert "sync.failed" not in types
+
+    events = sync._detect_events({}, {"status": "invalid", "error": "Token 无效"}, False, False)
+    assert [e[0] for e in events] == ["account.invalid"]
+
+    events = sync._detect_events({}, {"status": "active", "review_prs_count": 0}, False, True)
+    assert "account.capped" in [e[0] for e in events]
+
+
 def test_cross_account_related(populated):
     """同一 PR 被多个账号看到时，合并成一条跨账号关联待办。"""
     item = {

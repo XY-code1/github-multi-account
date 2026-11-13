@@ -175,3 +175,54 @@ def test_prune_audit():
     # 保留期外的一律清掉
     assert db.prune_audit(limit=100, max_days=-1) == 5
     assert db.list_audit(100) == []
+
+
+def test_webhook_dispatch_and_log(client):
+    """出站 Webhook：按事件订阅推送，并记录投递日志。"""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from app import webhook
+
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            received.append(json.loads(self.rfile.read(length)))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/hook"
+
+    try:
+        resp = client.post("/api/webhooks", json={"webhooks": [
+            {"name": "全部", "url": url, "events": [], "enabled": True},
+            {"name": "仅 Issue", "url": url, "events": ["issue.added"], "enabled": True},
+            {"name": "已停用", "url": url, "events": [], "enabled": False},
+        ]})
+        assert resp.status_code == 200
+
+        asyncio.run(webhook.dispatch("review_pr.added", {
+            "account": {"id": 1, "username": "u", "label": "U"},
+            "detail": "待 Review PR 从 2 增加到 3",
+            "ts": "2026-01-02T00:00:00Z",
+        }))
+        assert len(received) == 1, "只有订阅全部事件的 Webhook 应收到"
+        assert received[0]["event"] == "review_pr.added"
+        assert received[0]["account"]["username"] == "u"
+
+        log = client.get("/api/webhooks/log").json()
+        assert log["total"] == 1
+        assert log["items"][0]["ok"] == 1
+        assert log["items"][0]["event_type"] == "review_pr.added"
+    finally:
+        server.shutdown()
