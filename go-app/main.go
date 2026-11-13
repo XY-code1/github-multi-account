@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/mcp"
 	"github-multi-account/internal/notify"
 	"github-multi-account/internal/ops"
 	"github-multi-account/internal/server"
@@ -40,6 +41,15 @@ var candidatePorts = []int{8000, 8080, 8888, 5000, 3000, 9000, 8001, 8081, 9090}
 
 func main() {
 	base := baseDir()
+
+	// MCP 模式：作为 stdio 服务暴露运维中心能力（供 Claude / Cursor 调用）
+	if len(os.Args) > 1 && os.Args[1] == "--mcp" {
+		if err := mcp.Run(base); err != nil {
+			log.Printf("MCP 服务异常: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	err := run(base)
 	switch {
