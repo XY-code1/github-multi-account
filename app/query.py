@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from . import config, db
+from .db import QUOTA_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,8 @@ def _merged_rows() -> list[dict[str, Any]]:
         if (st.get("consecutive_failures") or 0) >= 3 and status == "active":
             status = "sync_failed"
         remaining = int(rl.get("remaining") or 0) if rl else 0
+        quota_limit = int(rl.get("quota_limit") or 0) if rl else 0
+        quota_capped = 1 if quota_limit > 0 and remaining <= QUOTA_CAP else 0
         rows.append(
             {
                 "id": a["id"],
@@ -73,7 +76,8 @@ def _merged_rows() -> list[dict[str, Any]]:
                 "consecutive_failures": int(st.get("consecutive_failures") or 0),
                 "sync_enabled": st.get("sync_enabled") if st.get("sync_enabled") is not None else True,
                 "remaining": remaining,
-                "quota_limit": int(rl.get("quota_limit") or 0) if rl else 0,
+                "quota_limit": quota_limit,
+                "quota_capped": quota_capped,
                 "review_prs": int(s.get("review_prs") or 0),
                 "my_prs": int(s.get("my_prs") or 0),
                 "assigned_issues": int(s.get("assigned_issues") or 0),

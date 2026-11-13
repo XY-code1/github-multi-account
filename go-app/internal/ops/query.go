@@ -13,6 +13,10 @@ import (
 	"github-multi-account/internal/config"
 )
 
+// QuotaCap 是「API 已封顶」的剩余额度阈值：正常 Token 5000/小时，
+// 未认证请求只有 60/小时，所以 60 基本意味着 Token 没生效或已耗尽。
+const QuotaCap = 60
+
 // AccountQuery 是账号列表的查询参数。
 type AccountQuery struct {
 	Page     int
@@ -45,6 +49,7 @@ type AccountRow struct {
 	SyncEnabled         bool     `json:"sync_enabled"`
 	Remaining           int      `json:"remaining"`
 	QuotaLimit          int      `json:"quota_limit"`
+	QuotaCapped         bool     `json:"quota_capped"`
 	ReviewPRs           int      `json:"review_prs"`
 	MyPRs               int      `json:"my_prs"`
 	AssignedIssues      int      `json:"assigned_issues"`
@@ -141,6 +146,9 @@ func QueryAccounts(db *sql.DB, accounts []config.Account, q AccountQuery) (*Acco
 		if hasRL {
 			remaining, quotaLimit = rl.Remaining, rl.QuotaLimit
 		}
+		// 剩余不超过 QuotaCap 视为「已封顶」：未认证请求只有 60/小时，
+		// 正常 Token 是 5000/小时，所以 60 基本意味着 Token 没生效或已耗尽。
+		quotaCapped := quotaLimit > 0 && remaining <= QuotaCap
 		label := a.Label
 		if label == "" {
 			label = a.Username
@@ -167,6 +175,7 @@ func QueryAccounts(db *sql.DB, accounts []config.Account, q AccountQuery) (*Acco
 			SyncEnabled:         enable,
 			Remaining:           remaining,
 			QuotaLimit:          quotaLimit,
+			QuotaCapped:         quotaCapped,
 			ReviewPRs:           s.ReviewPRs,
 			MyPRs:               s.MyPRs,
 			AssignedIssues:      s.AssignedIssues,

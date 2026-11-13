@@ -99,6 +99,10 @@ CREATE INDEX IF NOT EXISTS idx_summaries_group ON summaries(group_name);
 
 ACCOUNT_TYPES = ("personal", "bot", "org")
 
+# API 剩余不超过该值视为「已封顶」：正常 Token 是 5000/小时，
+# 而未认证请求只有 60/小时，所以 60 基本意味着 Token 没生效或已耗尽。
+QUOTA_CAP = 60
+
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:

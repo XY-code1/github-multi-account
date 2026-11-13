@@ -130,6 +130,21 @@ def test_avatar_url_from_payload(many_accounts):
     assert item2["avatar_url"] == ""
 
 
+def test_quota_capped_classification(many_accounts):
+    """剩余 <= 60（含未认证的 60/小时额度）视为「已封顶」异常。"""
+    db.upsert_rate_limit(1, "user1", 60, 5000, None)   # 正好 60 → 封顶
+    db.upsert_rate_limit(2, "user2", 61, 5000, None)   # 61 → 只是偏低
+    db.upsert_rate_limit(3, "user3", 0, 60, None)      # 未认证额度 → 封顶
+    db.upsert_rate_limit(4, "user4", 0, 0, None)       # 没有额度数据 → 不算
+
+    r = query_accounts(page_size=50)
+    capped = {i["id"]: i["quota_capped"] for i in r["items"]}
+    assert capped[1] == 1
+    assert capped[2] == 0
+    assert capped[3] == 1
+    assert capped[4] == 0
+
+
 def test_sync_failed_flagging(many_accounts):
     """活跃账号连续失败 3 次以上应标记为同步失败。"""
     db.upsert_sync_state(

@@ -83,6 +83,23 @@ def test_activities_aggregate(populated):
     assert acts[0]["account_label"] == "好号A"
 
 
+def test_quota_capped_summary_and_task(populated):
+    """剩余 <= 60 算异常：计入总览风险，并生成高优先级待办。"""
+    db.upsert_rate_limit(2, "good1", 30, 5000, None)
+
+    s = dashboard.build_summary()
+    assert s["quota_capped"] == 1
+    assert s["quota_low"] == 1
+
+    tasks = dashboard.build_tasks()
+    capped = [t for t in tasks if t["type"] == "quota_capped"]
+    assert len(capped) == 1
+    assert capped[0]["priority"] == "high"
+    assert capped[0]["account_username"] == "good1"
+    # 封顶的账号不再重复生成「配额不足」的中优先级待办
+    assert not [t for t in tasks if t["type"] == "quota" and t["account_id"] == 2]
+
+
 def test_task_includes_account_username(populated):
     """待办要带上具体账号身份，便于区分同名的不同账号。"""
     tasks = dashboard.build_tasks()

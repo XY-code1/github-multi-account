@@ -172,8 +172,10 @@ function renderSummary(s) {
     </div>
     <div class="summary-card">
       <div class="summary-title">风险</div>
-      <div class="summary-main"><span class="summary-num ${s.credential_risk ? "is-danger" : ""}">${s.credential_risk}</span></div>
+      <div class="summary-main"><span class="summary-num ${(s.credential_risk || s.quota_capped) ? "is-danger" : ""}">${(s.credential_risk || 0) + (s.quota_capped || 0)}</span></div>
       <div class="summary-sub">
+        <span class="tag ${s.credential_risk ? "is-danger" : ""}">凭据 ${s.credential_risk}</span>
+        <span class="tag ${s.quota_capped ? "is-danger" : ""}">已封顶 ${s.quota_capped}</span>
         <span class="tag ${s.quota_low ? "is-warning" : ""}">配额不足 ${s.quota_low}</span>
       </div>
     </div>
@@ -207,7 +209,7 @@ function renderOverviewTasks(tasks) {
 
 function taskHtml(t) {
   const icon = {
-    credential: "🔑", quota: "📊", review_pr: "👀", my_pr: "📤",
+    credential: "🔑", quota: "📊", quota_capped: "🚫", review_pr: "👀", my_pr: "📤",
     issue: "📋", sync_failed: "⚠", sync_stale: "🕘",
   }[t.type] || "•";
   const accountTag = t.account_username
@@ -342,6 +344,7 @@ function renderAccountTable(items) {
       <td>
         <div class="progress ${low}"><span style="width:${pct}%"></span></div>
         <span class="cell-sub">${a.remaining}/${a.quota_limit || "?"}</span>
+        ${a.quota_capped ? '<span class="tag is-danger">已封顶</span>' : ""}
       </td>
       <td>${a.review_prs}</td>
       <td>${a.assigned_issues}</td>
@@ -618,6 +621,26 @@ async function importSelectedDocx() {
     await loadOverview();
   } catch (e) {
     showToast(e.message);
+  }
+}
+
+// ---------------- 全部同步 ----------------
+
+// 一键同步全部账号（与顶部「同步」相同），单账号的「同步」按钮保持不变
+async function syncAllAccounts() {
+  const btn = document.getElementById("syncAllAccountsBtn");
+  btn.disabled = true;
+  btn.textContent = "同步中…";
+  try {
+    const r = await api("/api/sync/run", { method: "POST" });
+    showToast(`同步完成：成功 ${r.done}，失败 ${r.failed}`);
+    state.detailCache = {};
+    await loadAccountsPage(false);
+  } catch (e) {
+    showToast(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "全部同步";
   }
 }
 
@@ -1490,6 +1513,7 @@ function bindEvents() {
   document.getElementById("batchResume").addEventListener("click", () => batchSetSync(true));
   document.getElementById("batchTag").addEventListener("click", batchTag);
   document.getElementById("batchGroup").addEventListener("click", batchGroup);
+  document.getElementById("syncAllAccountsBtn").addEventListener("click", syncAllAccounts);
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

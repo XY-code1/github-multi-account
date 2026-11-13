@@ -313,6 +313,72 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 }
 
+func TestQuotaCapped(t *testing.T) {
+	cfg, cleanup := newTestEnv(t)
+	defer cleanup()
+	addAccounts(t, cfg, 3)
+	db := DB()
+
+	// 1 号正好 60（封顶），2 号 61（只是偏低），3 号额度 60（未认证封顶）
+	mustUpsertRateLimit(t, db, RateLimit{AccountID: 1, Username: "user1", Remaining: 60, QuotaLimit: 5000})
+	mustUpsertRateLimit(t, db, RateLimit{AccountID: 2, Username: "user2", Remaining: 61, QuotaLimit: 5000})
+	mustUpsertRateLimit(t, db, RateLimit{AccountID: 3, Username: "user3", Remaining: 0, QuotaLimit: 60})
+	for i, u := range []string{"user1", "user2", "user3"} {
+		mustUpsertSummary(t, db, SummaryRow{
+			AccountID: i + 1, Username: u, Status: "active",
+			Label: "账号" + itoa(i+1), SyncedAt: "2026-01-02T00:00:00Z",
+		})
+	}
+
+	accounts, _ := cfg.Accounts()
+	r, err := QueryAccounts(db, accounts, AccountQuery{PageSize: 10})
+	if err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	capped := map[int]bool{}
+	for _, item := range r.Items {
+		capped[item.ID] = item.QuotaCapped
+	}
+	if !capped[1] || capped[2] || !capped[3] {
+		t.Fatalf("封顶判定不正确: %+v", capped)
+	}
+
+	s, err := BuildSummary(db, accounts)
+	if err != nil {
+		t.Fatalf("总览失败: %v", err)
+	}
+	if s.QuotaCapped != 2 {
+		t.Fatalf("总览封顶数应为 2，得到 %d", s.QuotaCapped)
+	}
+
+	tasks, err := BuildTasks(db, accounts)
+	if err != nil {
+		t.Fatalf("待办失败: %v", err)
+	}
+	high, medium := 0, 0
+	for _, task := range tasks {
+		switch task.Type {
+		case "quota_capped":
+			high++
+			if task.Priority != "high" || task.AccountUsername == "" {
+				t.Fatalf("封顶待办不正确: %+v", task)
+			}
+		case "quota":
+			medium++
+		}
+	}
+	if high != 2 || medium != 1 {
+		t.Fatalf("应 2 条高优先级封顶 + 1 条中优先级偏低（user2），得到 high=%d medium=%d", high, medium)
+	}
+}
+
+func mustUpsertRateLimit(t *testing.T, db *sql.DB, r RateLimit) {
+	t.Helper()
+	if err := UpsertRateLimit(db, r); err != nil {
+		t.Fatalf("写入配额失败: %v", err)
+	}
+}
+
 func TestPruneAudit(t *testing.T) {
 	_, cleanup := newTestEnv(t)
 	defer cleanup()

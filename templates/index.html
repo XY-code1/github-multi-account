@@ -147,6 +147,7 @@
             <option value="username">用户名</option>
           </select>
           <button id="sortOrder" class="btn btn-sm" title="切换排序方向">↓ 降序</button>
+          <button id="syncAllAccountsBtn" class="btn btn-sm" title="立即同步全部账号（不改变单账号同步）">全部同步</button>
         </div>
         <div id="batchBar" class="batch-bar hidden">
           <span id="selectedCount">已选 0 个</span>
@@ -209,6 +210,7 @@
             <option value="">全部类型</option>
             <option value="credential">凭据异常</option>
             <option value="quota">API 配额不足</option>
+            <option value="quota_capped">API 已封顶</option>
             <option value="review_pr">待 Review PR</option>
             <option value="my_pr">我的 PR</option>
             <option value="issue">分配 Issue</option>

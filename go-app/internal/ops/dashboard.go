@@ -21,6 +21,7 @@ type Summary struct {
 	Attention      int    `json:"attention"`
 	CredentialRisk int    `json:"credential_risk"`
 	QuotaLow       int    `json:"quota_low"`
+	QuotaCapped    int    `json:"quota_capped"`
 	ReviewPRs      int    `json:"review_prs"`
 	MyPRs          int    `json:"my_prs"`
 	Issues         int    `json:"issues"`
@@ -59,13 +60,14 @@ type Activity struct {
 }
 
 var taskTypeLabels = map[string]string{
-	"credential":  "凭据异常",
-	"quota":       "API 配额不足",
-	"review_pr":   "待我 Review 的 PR",
-	"my_pr":       "我发起的 PR",
-	"issue":       "分配给我的 Issue",
-	"sync_failed": "同步失败",
-	"sync_stale":  "长期未同步",
+	"credential":   "凭据异常",
+	"quota":        "API 配额不足",
+	"quota_capped": "API 已封顶",
+	"review_pr":    "待我 Review 的 PR",
+	"my_pr":        "我发起的 PR",
+	"issue":        "分配给我的 Issue",
+	"sync_failed":  "同步失败",
+	"sync_stale":   "长期未同步",
 }
 
 var priorityOrder = map[string]int{"high": 0, "medium": 1, "low": 2}
@@ -121,8 +123,13 @@ func BuildSummary(db *sql.DB, accounts []config.Account) (*Summary, error) {
 		out.ReviewPRs += s.ReviewPRs
 		out.MyPRs += s.MyPRs
 		out.Issues += s.AssignedIssues
-		if rl, ok := limits[a.ID]; ok && rl.Remaining < quotaLowThreshold {
-			out.QuotaLow++
+		if rl, ok := limits[a.ID]; ok {
+			if rl.Remaining < quotaLowThreshold {
+				out.QuotaLow++
+			}
+			if rl.QuotaLimit > 0 && rl.Remaining <= QuotaCap {
+				out.QuotaCapped++
+			}
 		}
 		if st.LastSyncAt != "" && st.LastSyncAt > out.LastSyncAt {
 			out.LastSyncAt = st.LastSyncAt
@@ -171,9 +178,15 @@ func BuildTasks(db *sql.DB, accounts []config.Account) ([]Task, error) {
 			tasks = append(tasks, newTask("credential", "high", "凭据无效或已过期",
 				orString(s.Error, "登录失败，请检查 Token"), label, s.AccountID, acc.Username, syncedAt, "重新录入凭据"))
 		}
-		if hasRL && rl.Remaining < quotaLowThreshold {
-			tasks = append(tasks, newTask("quota", "medium", "API 配额不足",
-				itoa(rl.Remaining)+"/"+itoa(rl.QuotaLimit), label, s.AccountID, acc.Username, rl.UpdatedAt, "查看配额"))
+		if hasRL {
+			if rl.QuotaLimit > 0 && rl.Remaining <= QuotaCap {
+				tasks = append(tasks, newTask("quota_capped", "high", "API 已封顶",
+					itoa(rl.Remaining)+"/"+itoa(rl.QuotaLimit)+"（未认证额度仅 60/小时）",
+					label, s.AccountID, acc.Username, rl.UpdatedAt, "检查凭据"))
+			} else if rl.Remaining < quotaLowThreshold {
+				tasks = append(tasks, newTask("quota", "medium", "API 配额不足",
+					itoa(rl.Remaining)+"/"+itoa(rl.QuotaLimit), label, s.AccountID, acc.Username, rl.UpdatedAt, "查看配额"))
+			}
 		}
 		if s.ReviewPRs > 0 {
 			tasks = append(tasks, newTask("review_pr", "medium",

@@ -19,6 +19,7 @@ PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 TASK_TYPES = {
     "credential": "凭据异常",
     "quota": "API 配额不足",
+    "quota_capped": "API 已封顶",
     "review_pr": "待我 Review 的 PR",
     "my_pr": "我发起的 PR",
     "issue": "分配给我的 Issue",
@@ -46,7 +47,7 @@ def build_summary() -> dict[str, Any]:
     limits = db.all_rate_limits()
 
     total = len(accounts)
-    healthy = attention = credential_risk = quota_low = 0
+    healthy = attention = credential_risk = quota_low = quota_capped = 0
     review_prs = my_prs = issues = 0
     last_sync: str | None = None
 
@@ -65,8 +66,12 @@ def build_summary() -> dict[str, Any]:
             my_prs += int(s.get("my_prs") or 0)
             issues += int(s.get("assigned_issues") or 0)
         rl = limits.get(a["id"])
-        if rl and int(rl.get("remaining") or 0) < 100:
-            quota_low += 1
+        if rl:
+            remaining = int(rl.get("remaining") or 0)
+            if remaining < 100:
+                quota_low += 1
+            if int(rl.get("quota_limit") or 0) > 0 and remaining <= db.QUOTA_CAP:
+                quota_capped += 1
         ts = st.get("last_sync_at")
         if ts and (last_sync is None or ts > last_sync):
             last_sync = ts
@@ -77,6 +82,7 @@ def build_summary() -> dict[str, Any]:
         "attention": attention,
         "credential_risk": credential_risk,
         "quota_low": quota_low,
+        "quota_capped": quota_capped,
         "review_prs": review_prs,
         "my_prs": my_prs,
         "issues": issues,
@@ -132,10 +138,17 @@ def build_tasks() -> list[dict[str, Any]]:
             tasks.append(_task("credential", "high", "凭据无效或已过期",
                                s.get("error") or "登录失败，请检查 Token",
                                label, aid, acc.get("username", ""), synced_at, "重新录入凭据"))
-        if rl and int(rl.get("remaining") or 0) < 100:
-            tasks.append(_task("quota", "medium", "API 配额不足",
-                               f"剩余 {rl.get('remaining')}/{rl.get('quota_limit')}",
-                               label, aid, acc.get("username", ""), rl.get("updated_at"), "查看配额"))
+        if rl:
+            rl_remaining = int(rl.get("remaining") or 0)
+            rl_limit = int(rl.get("quota_limit") or 0)
+            if rl_limit > 0 and rl_remaining <= db.QUOTA_CAP:
+                tasks.append(_task("quota_capped", "high", "API 已封顶",
+                                   f"剩余 {rl_remaining}/{rl_limit}（未认证额度仅 60/小时）",
+                                   label, aid, acc.get("username", ""), rl.get("updated_at"), "检查凭据"))
+            elif rl_remaining < 100:
+                tasks.append(_task("quota", "medium", "API 配额不足",
+                                   f"剩余 {rl_remaining}/{rl_limit}",
+                                   label, aid, acc.get("username", ""), rl.get("updated_at"), "查看配额"))
         if int(s.get("review_prs") or 0) > 0:
             tasks.append(_task("review_pr", "medium", f"{s['review_prs']} 个 PR 等待你 Review",
                                "有人请求你审查代码", label, aid, acc.get("username", ""), synced_at, "去 Review"))
