@@ -14,8 +14,8 @@ config/accounts.yaml.tmp
 # 本机加密密钥，丢失后已保存的 token 将无法解密
 config/.secret.key
 
-# 本地历史快照数据库
-data/
+# 本地历史快照数据库（锚定到仓库根，避免误伤子目录）
+/data/
 
 .idea/
 .vscode/
