@@ -43,6 +43,15 @@
 - **账号头像** —— 账号列表展示 GitHub 头像，多个账号一眼区分
 - **一键全部同步** —— 账号列表工具栏一键同步全部账号（单账号「同步」按钮保留）
 - **API 已封顶归类** —— 剩余额度 ≤ 60/小时（未认证额度）的账号计为异常，进入总览风险与高优先级待办
+
+### 进阶能力（2026-11 新增）
+
+- **增量同步** —— GitHub 客户端带 ETag 发条件请求，未变化（304）不消耗 API 配额；几百个账号时配额消耗可降一个数量级
+- **跨账号去重** —— 同一个 PR / Issue 被多个账号看到时合并成一条待办，标注「N 个账号相关」
+- **MCP Server** —— `GitHub仪表盘.exe --mcp` 以 stdio 暴露 MCP 工具（查待办、账号列表、总览、详情、同步、批量打标签、审计），供 Claude / Cursor 直接调用
+- **出站 Webhook** —— 把账号事件（PR/Issue 增加、凭据失效、封顶、同步失败）推送到 n8n / Zapier / 自建服务，带投递日志
+- **账号关系图谱** —— 关注关系、共同仓库、共同关注三类边，SVG 力导向布局展示
+- **账号画像自动聚类** —— 按粉丝 / Star / 仓库 / 参与度 / 活跃度做 k-means 分群（核心 / 活跃 / 沉寂），作为打标签参考
 - **主题切换** —— 浅色 / 深色一键切换，默认跟随系统偏好，自动记忆
 - **键盘快捷键** —— 刷新、切标签页、账号导航等全流程键盘操作
 
@@ -151,6 +160,23 @@ accounts:
 | GET | `/api/dashboard/summary` | 全局账号总览 |
 | GET | `/api/dashboard/tasks` | 统一待办（支持 `priority/type/accountId` 筛选） |
 | GET | `/api/dashboard/activities` | 跨账号最近动态（重复活动已聚合） |
+| GET | `/api/graph` | 账号关系图谱（关注 / 共同仓库 / 共同关注） |
+| POST | `/api/graph/sync` | 慢速同步粉丝 / 关注 / 代表仓库 |
+| GET | `/api/profiles` | 账号画像（k-means 自动聚类） |
+| POST | `/api/profiles/rebuild` | 重新聚类 |
+| GET | `/api/webhooks` | 出站 Webhook 配置与事件类型 |
+| POST | `/api/webhooks` | 保存出站 Webhook 配置 |
+| GET | `/api/webhooks/log` | Webhook 投递日志 |
+
+### MCP Server（给 AI 助手调用）
+
+exe 内置 MCP 服务，可让 Claude / Cursor 直接操作运维中心：
+
+```bat
+GitHub仪表盘.exe --mcp
+```
+
+把它配置成 MCP 客户端的 stdio 服务即可。支持的工具：`list_accounts`、`get_todos`、`get_summary`、`get_account_detail`、`sync_account`、`sync_all`、`batch_tag`、`get_audit`。
 | GET | `/api/tasks` | 同步引擎进度与配置 |
 | POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 |
 | POST | `/api/sync/run` | 立即触发全量同步 |

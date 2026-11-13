@@ -64,6 +64,11 @@ config\.secret.key        （本机密钥，必须一起复制）
 - 粉丝 / 关注列表（带头像）与账号头像展示
 - 一键全部同步（账号列表工具栏），单账号同步保留
 - API 已封顶（剩余 ≤ 60/小时）账号归入异常风险与高优先级待办
+- 增量同步（ETag 条件请求，304 不耗配额）
+- 跨账号待办去重、关系图谱（关注 / 共同仓库 / 共同关注）
+- 账号画像自动聚类（核心 / 活跃 / 沉寂）
+- 出站 Webhook（事件推送到 n8n / Zapier / 自建服务）
+- MCP Server：`GitHub仪表盘.exe --mcp` 以 stdio 暴露工具给 Claude / Cursor
 - 主题切换、键盘快捷键、变化桌面提醒
 - 版本号显示 + 更新检查
 
@@ -123,6 +128,7 @@ go-app/
 │   ├── github/             GitHub REST API 客户端
 │   ├── service/            汇总 / 详情聚合、容错、并发限流
 │   ├── docx/               从 .docx 识别 GitHub Token 与用户名
+│   ├── mcp/                MCP Server（stdio，供 Claude / Cursor 调用）
 │   ├── ops/                运维中心：同步状态 / 配额 / 审计 / 元数据、后台同步引擎、全局聚合
 │   ├── store/              SQLite 历史快照
 │   └── server/             HTTP 路由、CSRF 防护、静态资源
