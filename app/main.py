@@ -126,6 +126,7 @@ async def create_account(payload: AccountIn) -> dict[str, Any]:
         note=payload.note or "",
         tags=payload.tags or [],
     )
+    db.clear_etags(acc["id"])
     db.audit("accounts.create", acc["id"], acc["username"], "新增/更新账号")
     return {
         "id": acc["id"],
@@ -148,6 +149,7 @@ async def remove_account(account_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="账号不存在")
     if username:
         store.delete_history(username)
+    db.clear_etags(account_id)
     db.audit("accounts.delete", account_id, username, "删除账号")
     return {"ok": True}
 

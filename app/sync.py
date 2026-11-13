@@ -196,7 +196,25 @@ class SyncEngine:
             except ValueError:
                 pass
 
-        summary = await service.fetch_account_summary(acc, include_events=True)
+        # 增量同步：带上各端点的 ETag，未变化（304）不消耗 API 配额
+        etags = {
+            key: value
+            for key, value in (
+                ("review_prs", db.get_etag(aid, "review_prs")),
+                ("my_prs", db.get_etag(aid, "my_prs")),
+                ("issues", db.get_etag(aid, "issues")),
+                ("events", db.get_etag(aid, "events")),
+            )
+            if value
+        }
+        summary = await service.fetch_account_summary(
+            acc,
+            include_events=True,
+            etags=etags,
+            previous=db.get_summary_dict(aid),
+        )
+        for key, value in etags.items():
+            db.put_etag(aid, key, value)
         db.upsert_sync_state(
             aid,
             username,

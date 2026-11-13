@@ -139,12 +139,52 @@ async def verify_token(username: str, token: str) -> dict[str, Any]:
         await client.aclose()
 
 
+def _apply_cond(
+    res: Any,
+    name: str,
+    etags: dict[str, str],
+    etag_key: str,
+    item_key: str,
+    count_key: str,
+    prev: dict[str, Any],
+    result: dict[str, Any],
+    is_events: bool = False,
+) -> str | None:
+    """把条件请求结果写回 result；返回失败名称或 None。
+
+    304（未变化）时用上一次的结果填充，避免把缓存清空。
+    """
+    if isinstance(res, BaseException):
+        return name
+    if is_events:
+        items, new_etag, modified = res  # type: ignore[misc]
+        total = 0
+    else:
+        total, items, new_etag, modified = res  # type: ignore[misc]
+    if new_etag:
+        etags[etag_key] = new_etag
+    if modified:
+        result[item_key] = items
+        if not is_events:
+            result[count_key] = total
+    else:
+        result[item_key] = prev.get(item_key, [])
+        if not is_events:
+            result[count_key] = prev.get(count_key, 0)
+    return None
+
+
 async def fetch_account_summary(
-    account: dict[str, Any], include_events: bool = False
+    account: dict[str, Any],
+    include_events: bool = False,
+    etags: dict[str, str] | None = None,
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """轻量汇总：登录态 + PR/Issue 计数。
 
     include_events=True 时额外拉取最近动态与配额（后台同步用）。
+    etags 非空时启用条件请求（ETag）：304 表示未变化，不消耗 API 配额，
+    直接用 previous 里的旧值，几百个账号时能省下一个数量级的请求。
     """
     token = account.get("token", "")
     result = _empty_result(account)
@@ -156,36 +196,79 @@ async def fetch_account_summary(
         result["error"] = "未配置 Token"
         return result
 
+    prev = previous or {}
     client = GitHubClient(token)
     try:
         login = await _resolve_login(client, account, result)
         if not login:
             return result
 
-        calls: list[Any] = [
-            client.review_requested_prs(login),
-            client.my_open_prs(login),
-            client.assigned_issues(login),
-        ]
-        if include_events:
-            calls.append(client.received_events(login))
-        results = await asyncio.gather(*calls, return_exceptions=True)
-        (review_res, mypr_res, issue_res), failed = _collect(
-            results[:3], ("待处理 PR", "我的 PR", "分配 Issue")
-        )
-        if failed:
-            result["warnings"] = failed
-            logger.warning("账号 %s 汇总部分失败: %s", account.get("username"), ", ".join(failed))
+        if etags is None:
+            calls: list[Any] = [
+                client.review_requested_prs(login),
+                client.my_open_prs(login),
+                client.assigned_issues(login),
+            ]
+            if include_events:
+                calls.append(client.received_events(login))
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            (review_res, mypr_res, issue_res), failed = _collect(
+                results[:3], ("待处理 PR", "我的 PR", "分配 Issue")
+            )
+            if failed:
+                result["warnings"] = failed
+                logger.warning("账号 %s 汇总部分失败: %s", account.get("username"), ", ".join(failed))
 
-        review_total, review_prs = _split(review_res)
-        my_total, my_prs = _split(mypr_res)
-        issue_total, issues = _split(issue_res)
-        result["review_prs"] = review_prs
-        result["my_prs"] = my_prs
-        result["assigned_issues"] = issues
-        result["review_prs_count"] = review_total
-        result["my_prs_count"] = my_total
-        result["assigned_issues_count"] = issue_total
+            review_total, review_prs = _split(review_res)
+            my_total, my_prs = _split(mypr_res)
+            issue_total, issues = _split(issue_res)
+            result["review_prs"] = review_prs
+            result["my_prs"] = my_prs
+            result["assigned_issues"] = issues
+            result["review_prs_count"] = review_total
+            result["my_prs_count"] = my_total
+            result["assigned_issues_count"] = issue_total
+
+            if include_events:
+                events_res = results[3]
+                if not isinstance(events_res, BaseException):
+                    result["events"] = events_res
+        else:
+            results = await asyncio.gather(
+                client.search_cond(
+                    f"is:open is:pr review-requested:{login}", 30, etags.get("review_prs")
+                ),
+                client.search_cond(
+                    f"is:open is:pr author:{login}", 30, etags.get("my_prs")
+                ),
+                client.search_cond(
+                    f"is:open is:issue assignee:{login}", 30, etags.get("issues")
+                ),
+                client.received_events_cond(login, 30, etags.get("events"))
+                if include_events
+                else asyncio.sleep(0),
+                return_exceptions=True,
+            )
+            failed = []
+            for res, name, ekey, ikey, ckey in (
+                (results[0], "待处理 PR", "review_prs", "review_prs", "review_prs_count"),
+                (results[1], "我的 PR", "my_prs", "my_prs", "my_prs_count"),
+                (results[2], "分配 Issue", "issues", "assigned_issues", "assigned_issues_count"),
+            ):
+                failed_name = _apply_cond(res, name, etags, ekey, ikey, ckey, prev, result)
+                if failed_name:
+                    failed.append(failed_name)
+            if include_events:
+                ev_name = _apply_cond(
+                    results[3], "仓库动态", etags, "events", "events", "events", prev, result,
+                    is_events=True,
+                )
+                if ev_name:
+                    failed.append(ev_name)
+            if failed:
+                result["warnings"] = failed
+                logger.warning("账号 %s 汇总部分失败: %s", account.get("username"), ", ".join(failed))
+
         # 账号对比用的轻量指标（都来自 /user，无需额外请求）
         user = result["user"] or {}
         result["followers_count"] = user.get("followers", 0)
@@ -193,9 +276,6 @@ async def fetch_account_summary(
         result["public_repos"] = user.get("public_repos", 0)
 
         if include_events:
-            events_res = results[3]
-            if not isinstance(events_res, BaseException):
-                result["events"] = events_res
             try:
                 result["rate_limit"] = await client.rate_limit()
             except Exception:  # noqa: BLE001

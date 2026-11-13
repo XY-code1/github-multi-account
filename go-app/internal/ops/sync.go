@@ -381,7 +381,24 @@ func (e *Engine) SyncAccount(acc config.Account) (bool, string, string) {
 		}
 	}
 
-	st := e.svc.SyncSummary(acc)
+	// 增量同步：带上各端点的 ETag，未变化（304）不消耗 API 配额
+	etags := map[string]string{}
+	for _, key := range []string{"review_prs", "my_prs", "issues", "events"} {
+		if v, err := GetETag(e.db, aid, key); err == nil && v != "" {
+			etags[key] = v
+		}
+	}
+	var previous *service.Status
+	if row, err := GetSummary(e.db, aid); err == nil && row != nil && len(row.Payload) > 0 {
+		var p service.Status
+		if json.Unmarshal(row.Payload, &p) == nil {
+			previous = &p
+		}
+	}
+	st := e.svc.SyncSummaryCond(acc, etags, previous)
+	for key, value := range etags {
+		_ = PutETag(e.db, aid, key, value)
+	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 
 	UpsertSyncState(e.db, SyncState{

@@ -95,6 +95,45 @@ CREATE TABLE IF NOT EXISTS summaries (
 CREATE INDEX IF NOT EXISTS idx_summaries_status ON summaries(status);
 CREATE INDEX IF NOT EXISTS idx_summaries_username ON summaries(username);
 CREATE INDEX IF NOT EXISTS idx_summaries_group ON summaries(group_name);
+
+-- 增量同步：按账号 + 端点缓存 ETag，命中 304 时不消耗 API 配额
+CREATE TABLE IF NOT EXISTS api_cache (
+    account_id INTEGER NOT NULL,
+    endpoint TEXT NOT NULL,
+    etag TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, endpoint)
+);
+
+-- 账号关系图谱：粉丝 / 关注（定期同步入库）
+CREATE TABLE IF NOT EXISTS social (
+    account_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    login TEXT NOT NULL,
+    avatar_url TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, kind, login)
+);
+CREATE INDEX IF NOT EXISTS idx_social_login ON social(login);
+
+-- 账号画像：自动聚类结果
+CREATE TABLE IF NOT EXISTS account_profile (
+    account_id INTEGER PRIMARY KEY,
+    cluster_index INTEGER,
+    cluster_label TEXT,
+    features TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- 出站 Webhook 投递日志
+CREATE TABLE IF NOT EXISTS webhook_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    url TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    ok INTEGER DEFAULT 0,
+    detail TEXT
+);
 """
 
 ACCOUNT_TYPES = ("personal", "bot", "org")
@@ -308,6 +347,41 @@ def all_rate_limits() -> dict[int, dict[str, Any]]:
     return {r["account_id"]: dict(r) for r in rows}
 
 
+# ------------------------------ 增量同步 ETag ------------------------------
+
+def get_etag(account_id: int, endpoint: str) -> str | None:
+    if not DB_FILE.exists():
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT etag FROM api_cache WHERE account_id=? AND endpoint=?",
+            (account_id, endpoint),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def put_etag(account_id: int, endpoint: str, etag: str | None) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO api_cache (account_id, endpoint, etag, updated_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(account_id, endpoint) DO UPDATE SET
+                 etag=excluded.etag, updated_at=excluded.updated_at
+            """,
+            (account_id, endpoint, etag, ts),
+        )
+
+
+def clear_etags(account_id: int | None = None) -> None:
+    """清除 ETag 缓存（账号删除或 Token 变更时）。"""
+    with _lock, _connect() as conn:
+        if account_id is None:
+            conn.execute("DELETE FROM api_cache")
+        else:
+            conn.execute("DELETE FROM api_cache WHERE account_id=?", (account_id,))
+
+
 # ------------------------------ 账号元数据 ------------------------------
 
 def rebuild_meta(accounts: list[dict[str, Any]]) -> None:
@@ -434,3 +508,14 @@ def get_summary(account_id: int) -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001
         d["tags"] = []
     return d
+
+
+def get_summary_dict(account_id: int) -> dict[str, Any]:
+    """返回汇总缓存的 payload（解析后的 dict），供增量同步做 304 兜底。"""
+    row = get_summary(account_id)
+    if not row:
+        return {}
+    try:
+        return json.loads(row.get("payload") or "{}")
+    except Exception:  # noqa: BLE001
+        return {}

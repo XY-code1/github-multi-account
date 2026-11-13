@@ -205,7 +205,32 @@ func (s *Service) Summary(acc config.Account) *Status {
 
 // SyncSummary 是后台同步用的汇总：在 Summary 的基础上额外拉取最近动态与 API 配额，
 // 结果写入本地缓存供仪表盘读取（不实时请求 GitHub）。
+// SyncSummary 是全量同步汇总（不启用条件请求）。
 func (s *Service) SyncSummary(acc config.Account) *Status {
+	return s.syncSummary(acc, nil, nil)
+}
+
+// SyncSummaryCond 是增量同步汇总：etags 非空时启用 ETag 条件请求，
+// 304 表示未变化（不消耗 API 配额），直接用 previous 里的旧值。
+func (s *Service) SyncSummaryCond(acc config.Account, etags map[string]string, previous *Status) *Status {
+	return s.syncSummary(acc, etags, previous)
+}
+
+func prevSearch(prev *Status, idx int) (int, []github.IssueItem) {
+	if prev == nil {
+		return 0, nil
+	}
+	switch idx {
+	case 0:
+		return prev.ReviewPRsCount, prev.ReviewPRs
+	case 1:
+		return prev.MyPRsCount, prev.MyPRs
+	default:
+		return prev.AssignedIssuesCount, prev.AssignedIssues
+	}
+}
+
+func (s *Service) syncSummary(acc config.Account, etags map[string]string, previous *Status) *Status {
 	st := emptyStatus(acc)
 	if acc.Token == "" {
 		st.Status = "invalid"
@@ -222,6 +247,7 @@ func (s *Service) SyncSummary(acc config.Account) *Status {
 	st.User = user
 	st.Status = "active"
 	login := user.Login
+	useCond := etags != nil
 
 	var (
 		mu          sync.Mutex
@@ -235,47 +261,82 @@ func (s *Service) SyncSummary(acc config.Account) *Status {
 		events      []github.Event
 		wg          sync.WaitGroup
 	)
+
+	apply := func(idx int, total int, items []github.IssueItem) {
+		switch idx {
+		case 0:
+			reviewTotal, reviewItems = total, items
+		case 1:
+			myTotal, myItems = total, items
+		case 2:
+			issueTotal, issueItems = total, items
+		}
+	}
+
+	fetchSearch := func(idx int, name, query, ekey string, prevTotal int, prevItems []github.IssueItem) {
+		defer wg.Done()
+		var (
+			total   int
+			items   []github.IssueItem
+			newETag string
+			mod     = true
+			err     error
+		)
+		if useCond {
+			total, items, newETag, mod, err = c.SearchCond(query, 30, etags[ekey])
+		} else {
+			total, items, err = c.Search(query, 30)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if newETag != "" {
+			etags[ekey] = newETag
+		}
+		if err != nil {
+			failures = append(failures, name)
+			return
+		}
+		if useCond && !mod {
+			apply(idx, prevTotal, prevItems)
+			return
+		}
+		apply(idx, total, items)
+	}
+
+	prev0t, prev0i := prevSearch(previous, 0)
+	prev1t, prev1i := prevSearch(previous, 1)
+	prev2t, prev2i := prevSearch(previous, 2)
+
 	wg.Add(4)
+	go fetchSearch(0, "待处理 PR", "is:open is:pr review-requested:"+login, "review_prs", prev0t, prev0i)
+	go fetchSearch(1, "我的 PR", "is:open is:pr author:"+login, "my_prs", prev1t, prev1i)
+	go fetchSearch(2, "分配 Issue", "is:open is:issue assignee:"+login, "issues", prev2t, prev2i)
 	go func() {
 		defer wg.Done()
-		t, items, err := c.ReviewRequestedPRs(login, 30)
-		mu.Lock()
-		defer mu.Unlock()
-		if err != nil {
-			failures = append(failures, "待处理 PR")
-			return
+		var (
+			v       []github.Event
+			newETag string
+			mod     = true
+			err     error
+		)
+		if useCond {
+			v, newETag, mod, err = c.ReceivedEventsCond(login, 30, etags["events"])
+		} else {
+			v, err = c.ReceivedEvents(login, 30)
 		}
-		reviewTotal, reviewItems = t, items
-	}()
-	go func() {
-		defer wg.Done()
-		t, items, err := c.MyOpenPRs(login, 30)
 		mu.Lock()
 		defer mu.Unlock()
-		if err != nil {
-			failures = append(failures, "我的 PR")
-			return
+		if newETag != "" {
+			etags["events"] = newETag
 		}
-		myTotal, myItems = t, items
-	}()
-	go func() {
-		defer wg.Done()
-		t, items, err := c.AssignedIssues(login, 30)
-		mu.Lock()
-		defer mu.Unlock()
-		if err != nil {
-			failures = append(failures, "分配 Issue")
-			return
-		}
-		issueTotal, issueItems = t, items
-	}()
-	go func() {
-		defer wg.Done()
-		v, err := c.ReceivedEvents(login, 30)
-		mu.Lock()
-		defer mu.Unlock()
 		if err != nil {
 			failures = append(failures, "仓库动态")
+			return
+		}
+		if useCond && !mod {
+			if previous != nil {
+				events = previous.Events
+			}
 			return
 		}
 		events = v

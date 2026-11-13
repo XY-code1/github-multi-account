@@ -156,6 +156,8 @@ def test_partial_failure_isolation(populated, monkeypatch):
             if self.token == "ghp_bad":
                 raise RuntimeError("模拟：坏号失败")
             return {"login": "ok", "followers": 1, "following": 1, "public_repos": 1}
+        async def get_user_cond(self, etag=None):
+            return await self.get_user(), None, True
         async def review_requested_prs(self, login):
             return 0, []
         async def my_open_prs(self, login):
@@ -164,6 +166,10 @@ def test_partial_failure_isolation(populated, monkeypatch):
             return 0, []
         async def received_events(self, login):
             return []
+        async def search_cond(self, query, per_page=30, etag=None):
+            return 0, [], None, True
+        async def received_events_cond(self, login, per_page=30, etag=None):
+            return [], None, True
         async def rate_limit(self):
             return {"resources": {"core": {"remaining": 100, "limit": 5000}}}
 

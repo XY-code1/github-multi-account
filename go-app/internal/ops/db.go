@@ -81,6 +81,41 @@ CREATE TABLE IF NOT EXISTS summaries (
 CREATE INDEX IF NOT EXISTS idx_summaries_status ON summaries(status);
 CREATE INDEX IF NOT EXISTS idx_summaries_username ON summaries(username);
 CREATE INDEX IF NOT EXISTS idx_summaries_group ON summaries(group_name);
+
+CREATE TABLE IF NOT EXISTS api_cache (
+	account_id INTEGER NOT NULL,
+	endpoint TEXT NOT NULL,
+	etag TEXT,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (account_id, endpoint)
+);
+
+CREATE TABLE IF NOT EXISTS social (
+	account_id INTEGER NOT NULL,
+	kind TEXT NOT NULL,
+	login TEXT NOT NULL,
+	avatar_url TEXT,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (account_id, kind, login)
+);
+CREATE INDEX IF NOT EXISTS idx_social_login ON social(login);
+
+CREATE TABLE IF NOT EXISTS account_profile (
+	account_id INTEGER PRIMARY KEY,
+	cluster_index INTEGER,
+	cluster_label TEXT,
+	features TEXT,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS webhook_log (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts TEXT NOT NULL,
+	url TEXT NOT NULL,
+	event_type TEXT NOT NULL,
+	ok INTEGER DEFAULT 0,
+	detail TEXT
+);
 `
 
 var (
@@ -421,6 +456,43 @@ func ListAudit(db *sql.DB, limit int, action string) ([]AuditItem, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// ---------------- 增量同步 ETag ----------------
+
+// GetETag 返回某账号某端点缓存的 ETag（无则空字符串）。
+func GetETag(db *sql.DB, accountID int, endpoint string) (string, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	var etag sql.NullString
+	err := db.QueryRow(`SELECT etag FROM api_cache WHERE account_id=? AND endpoint=?`, accountID, endpoint).
+		Scan(&etag)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return etag.String, nil
+}
+
+// PutETag 写入某账号某端点的 ETag。
+func PutETag(db *sql.DB, accountID int, endpoint, etag string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	_, err := db.Exec(`
+		INSERT INTO api_cache (account_id, endpoint, etag, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(account_id, endpoint) DO UPDATE SET etag=excluded.etag, updated_at=excluded.updated_at
+	`, accountID, endpoint, nullStr(etag), now())
+	return err
+}
+
+// ClearETags 清除某账号的 ETag 缓存（删除账号或 Token 变更时）。
+func ClearETags(db *sql.DB, accountID int) error {
+	mu.Lock()
+	defer mu.Unlock()
+	_, err := db.Exec(`DELETE FROM api_cache WHERE account_id=?`, accountID)
+	return err
 }
 
 // ---------------- 账号元数据 ----------------

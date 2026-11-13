@@ -23,10 +23,13 @@ class GitHubError(Exception):
 
 
 class GitHubClient:
-    def __init__(self, token: str, timeout: float = 12.0):
+    def __init__(self, token: str, timeout: float = 12.0, transport: httpx.AsyncBaseTransport | None = None):
         if not token:
             raise GitHubError(0, "未配置 Token")
         self.token = token
+        kwargs: dict[str, Any] = {}
+        if transport is not None:
+            kwargs["transport"] = transport
         self.client = httpx.AsyncClient(
             base_url=API_BASE,
             headers={
@@ -36,13 +39,25 @@ class GitHubClient:
                 "User-Agent": "github-account-dashboard",
             },
             timeout=timeout,
+            **kwargs,
         )
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
-    async def _get(self, path: str, params: dict | None = None) -> Any:
-        resp = await self.client.get(path, params=params)
+    async def _request(
+        self, path: str, params: dict | None = None, etag: str | None = None
+    ) -> tuple[Any, str | None, bool]:
+        """发起 GET，返回 (数据, 新 ETag, 是否有变化)。
+
+        带上 If-None-Match 后，未变化时 GitHub 返回 304 且**不消耗 API 配额**，
+        这是几百个账号场景下省配额的关键。
+        """
+        headers = {"If-None-Match": etag} if etag else None
+        resp = await self.client.get(path, params=params, headers=headers)
+        new_etag = resp.headers.get("etag")
+        if resp.status_code == 304:
+            return None, new_etag or etag, False
         if resp.status_code == 401:
             raise GitHubError(401, "Token 无效或已过期")
         if resp.status_code == 403:
@@ -57,7 +72,33 @@ class GitHubClient:
         if resp.status_code == 404:
             raise GitHubError(404, "资源不存在或无访问权限")
         resp.raise_for_status()
-        return resp.json()
+        return resp.json(), new_etag, True
+
+    async def _get(self, path: str, params: dict | None = None) -> Any:
+        data, _, _ = await self._request(path, params)
+        return data
+
+    # ---------- 条件请求版本（供增量同步使用） ----------
+
+    async def get_user_cond(self, etag: str | None = None) -> tuple[Any, str | None, bool]:
+        return await self._request("/user", etag=etag)
+
+    async def search_cond(
+        self, query: str, per_page: int = 30, etag: str | None = None
+    ) -> tuple[int, list[dict], str | None, bool]:
+        data, new_etag, modified = await self._request(
+            "/search/issues", params={"q": query, "per_page": per_page}, etag=etag
+        )
+        if not modified:
+            return 0, [], new_etag, False
+        return data.get("total_count", 0), data.get("items", []), new_etag, True
+
+    async def received_events_cond(
+        self, login: str, per_page: int = 30, etag: str | None = None
+    ) -> tuple[list[dict], str | None, bool]:
+        return await self._request(
+            f"/users/{login}/received_events", params={"per_page": per_page}, etag=etag
+        )
 
     # ---------- 用户 ----------
 

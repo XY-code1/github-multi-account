@@ -153,6 +153,8 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
+	// 换 Token 后旧 ETag 失效，清掉缓存避免拿到 304 的旧数据
+	_ = ops.ClearETags(s.opsDB, acc.ID)
 	ops.Audit(s.opsDB, "accounts.create", &acc.ID, acc.Username, "新增/更新账号")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":           acc.ID,
@@ -182,6 +184,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	if username != "" && s.store != nil {
 		_, _ = s.store.DeleteHistory(username)
 	}
+	_ = ops.ClearETags(s.opsDB, id)
 	ops.Audit(s.opsDB, "accounts.delete", &id, username, "删除账号")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
