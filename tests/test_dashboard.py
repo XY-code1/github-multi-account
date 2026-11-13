@@ -123,6 +123,24 @@ def test_detect_events(populated):
     assert "account.capped" in [e[0] for e in events]
 
 
+def test_build_profiles(populated):
+    """账号画像：按影响力 / 活跃度自动聚类，结果写入 account_profile。"""
+    db.upsert_summary(2, "good1", {
+        "status": "active", "label": "好号A", "followers_count": 1000,
+        "total_stars": 500, "public_repos": 50, "review_prs_count": 5,
+        "my_prs_count": 2, "assigned_issues_count": 3,
+        "events": [{"type": "PushEvent"}] * 20,
+    })
+    db.upsert_summary(1, "bad", {"status": "invalid", "label": "坏号"})
+
+    result = dashboard.build_profiles()
+    assert len(result["clusters"]) == 3
+    assert len(result["accounts"]) == 3
+    top = next(a for a in result["accounts"] if a["account_id"] == 2)
+    assert top["cluster_label"] == "核心"
+    assert db.all_profiles()[2]["cluster_label"] == "核心"
+
+
 def test_build_graph(populated):
     """关系图谱：关注边 + 共同仓库边。"""
     db.replace_social(2, "following", [{"login": "good2", "avatar_url": ""}])

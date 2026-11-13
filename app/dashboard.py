@@ -216,6 +216,104 @@ def build_tasks() -> list[dict[str, Any]]:
     return tasks
 
 
+CLUSTER_NAMES = ("核心", "活跃", "沉寂")
+
+
+def _dist(a: list[float], b: list[float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _kmeans(vectors: list[list[float]], k: int, iterations: int = 25) -> tuple[list[list[float]], list[int]]:
+    """k-means：用最远点初始化，返回 (质心, 每个点的簇号)。"""
+    n = len(vectors)
+    dim = len(vectors[0])
+    centroids = [list(vectors[0])]
+    while len(centroids) < k:
+        best, best_d = 0, -1.0
+        for i, v in enumerate(vectors):
+            d = min(_dist(v, c) for c in centroids)
+            if d > best_d:
+                best, best_d = i, d
+        centroids.append(list(vectors[best]))
+    assign = [0] * n
+    for _ in range(iterations):
+        changed = False
+        for i, v in enumerate(vectors):
+            d = [_dist(v, c) for c in centroids]
+            c = d.index(min(d))
+            if c != assign[i]:
+                assign[i] = c
+                changed = True
+        for c in range(k):
+            members = [vectors[i] for i in range(n) if assign[i] == c]
+            if members:
+                centroids[c] = [sum(m[d] for m in members) / len(members) for d in range(dim)]
+        if not changed:
+            break
+    return centroids, assign
+
+
+def build_profiles() -> dict[str, Any]:
+    """账号画像：按影响力 / 活跃度自动聚类（k-means，k=3）。
+
+    特征：粉丝、总 Star、公开仓库、待 Review PR、我的 PR、分配 Issue、动态数。
+    结果写入 account_profile，并在账号列表里作为 cluster_label 展示。
+    """
+    accounts = config.load_accounts()
+    summaries = {s["account_id"]: s for s in db.all_summaries()}
+
+    ids: list[int] = []
+    vectors: list[list[float]] = []
+    for a in accounts:
+        s = summaries.get(a["id"], {})
+        events = _load_payload(s).get("events") or []
+        vectors.append([
+            float(s.get("followers") or 0),
+            float(s.get("total_stars") or 0),
+            float(s.get("public_repos") or 0),
+            float(s.get("review_prs") or 0),
+            float(s.get("my_prs") or 0),
+            float(s.get("assigned_issues") or 0),
+            float(len(events)),
+        ])
+        ids.append(a["id"])
+
+    if not vectors:
+        return {"clusters": [], "accounts": []}
+
+    maxes = [max((v[i] for v in vectors), default=0.0) or 1.0 for i in range(len(vectors[0]))]
+    norm = [[v[i] / maxes[i] for i in range(len(v))] for v in vectors]
+
+    k = min(3, len(norm))
+    centroids, assign = _kmeans(norm, k)
+
+    order = sorted(range(k), key=lambda c: sum(centroids[c]), reverse=True)
+    labels: dict[int, str] = {}
+    for rank, c in enumerate(order):
+        labels[c] = CLUSTER_NAMES[rank] if rank < len(CLUSTER_NAMES) else f"簇{rank}"
+
+    accounts_out = []
+    for i, aid in enumerate(ids):
+        db.upsert_profile(aid, assign[i], labels[assign[i]], json.dumps(vectors[i]))
+        accounts_out.append({
+            "account_id": aid,
+            "cluster": assign[i],
+            "cluster_label": labels[assign[i]],
+            "features": vectors[i],
+        })
+
+    clusters = [
+        {
+            "index": c,
+            "label": labels[c],
+            "size": sum(1 for a in assign if a == c),
+            "centroid": [round(x, 4) for x in centroids[c]],
+        }
+        for c in range(k)
+    ]
+    return {"clusters": clusters, "accounts": accounts_out}
+
+
 def build_graph() -> dict[str, Any]:
     """账号关系图谱：关注边 + 共同仓库边 + 共同关注边。
 

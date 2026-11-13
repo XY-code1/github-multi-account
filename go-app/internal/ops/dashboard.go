@@ -7,6 +7,7 @@ package ops
 import (
 	"database/sql"
 	"encoding/json"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -299,6 +300,211 @@ func BuildTasks(db *sql.DB, accounts []config.Account) ([]Task, error) {
 		return tasks[i].Time < tasks[j].Time
 	})
 	return tasks, nil
+}
+
+// ClusterInfo 是一个画像簇。
+type ClusterInfo struct {
+	Index    int       `json:"index"`
+	Label    string    `json:"label"`
+	Size     int       `json:"size"`
+	Centroid []float64 `json:"centroid"`
+}
+
+// ProfileAccount 是一个账号的画像结果。
+type ProfileAccount struct {
+	AccountID    int       `json:"account_id"`
+	Cluster      int       `json:"cluster"`
+	ClusterLabel string    `json:"cluster_label"`
+	Features     []float64 `json:"features"`
+}
+
+// ProfilesResult 是画像聚类结果。
+type ProfilesResult struct {
+	Clusters []ClusterInfo    `json:"clusters"`
+	Accounts []ProfileAccount `json:"accounts"`
+}
+
+// BuildProfiles 账号画像：按影响力 / 活跃度自动聚类（k-means，k=3）。
+// 特征：粉丝、总 Star、公开仓库、待 Review PR、我的 PR、分配 Issue、动态数。
+func BuildProfiles(db *sql.DB, accounts []config.Account) (*ProfilesResult, error) {
+	summaries, err := AllSummaries(db)
+	if err != nil {
+		return nil, err
+	}
+	sm := make(map[int]SummaryRow, len(summaries))
+	for _, s := range summaries {
+		sm[s.AccountID] = s
+	}
+
+	ids := []int{}
+	vectors := [][]float64{}
+	for _, a := range accounts {
+		s := sm[a.ID]
+		var payload struct {
+			Events []json.RawMessage `json:"events"`
+		}
+		if len(s.Payload) > 0 {
+			_ = json.Unmarshal(s.Payload, &payload)
+		}
+		vectors = append(vectors, []float64{
+			float64(s.Followers), float64(s.TotalStars), float64(s.PublicRepos),
+			float64(s.ReviewPRs), float64(s.MyPRs), float64(s.AssignedIssues),
+			float64(len(payload.Events)),
+		})
+		ids = append(ids, a.ID)
+	}
+	if len(vectors) == 0 {
+		return &ProfilesResult{Clusters: []ClusterInfo{}, Accounts: []ProfileAccount{}}, nil
+	}
+
+	dim := len(vectors[0])
+	maxes := make([]float64, dim)
+	for i := 0; i < dim; i++ {
+		m := 0.0
+		for _, v := range vectors {
+			if v[i] > m {
+				m = v[i]
+			}
+		}
+		if m == 0 {
+			m = 1
+		}
+		maxes[i] = m
+	}
+	norm := make([][]float64, len(vectors))
+	for i, v := range vectors {
+		norm[i] = make([]float64, dim)
+		for j := range v {
+			norm[i][j] = v[j] / maxes[j]
+		}
+	}
+
+	k := 3
+	if len(norm) < k {
+		k = len(norm)
+	}
+	centroids, assign := kmeans(norm, k, 25)
+
+	order := make([]int, k)
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool { return sumFloat(centroids[order[i]]) > sumFloat(centroids[order[j]]) })
+	names := []string{"核心", "活跃", "沉寂"}
+	labels := map[int]string{}
+	for rank, c := range order {
+		if rank < len(names) {
+			labels[c] = names[rank]
+		} else {
+			labels[c] = "簇" + itoa(rank)
+		}
+	}
+
+	out := &ProfilesResult{Clusters: []ClusterInfo{}, Accounts: []ProfileAccount{}}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for i, aid := range ids {
+		feats, _ := json.Marshal(vectors[i])
+		_ = UpsertProfile(db, ProfileRow{
+			AccountID: aid, ClusterIndex: assign[i], ClusterLabel: labels[assign[i]],
+			Features: string(feats), UpdatedAt: ts,
+		})
+		out.Accounts = append(out.Accounts, ProfileAccount{
+			AccountID: aid, Cluster: assign[i],
+			ClusterLabel: labels[assign[i]], Features: vectors[i],
+		})
+	}
+	for c := 0; c < k; c++ {
+		size := 0
+		for _, a := range assign {
+			if a == c {
+				size++
+			}
+		}
+		centroid := make([]float64, dim)
+		for i, x := range centroids[c] {
+			centroid[i] = math.Round(x*10000) / 10000
+		}
+		out.Clusters = append(out.Clusters, ClusterInfo{Index: c, Label: labels[c], Size: size, Centroid: centroid})
+	}
+	return out, nil
+}
+
+func distVec(a, b []float64) float64 {
+	s := 0.0
+	for i := range a {
+		d := a[i] - b[i]
+		s += d * d
+	}
+	return math.Sqrt(s)
+}
+
+func sumFloat(v []float64) float64 {
+	s := 0.0
+	for _, x := range v {
+		s += x
+	}
+	return s
+}
+
+// kmeans 用最远点初始化，返回 (质心, 每个点的簇号)。
+func kmeans(vectors [][]float64, k, iterations int) ([][]float64, []int) {
+	n := len(vectors)
+	dim := len(vectors[0])
+	centroids := [][]float64{append([]float64{}, vectors[0]...)}
+	for len(centroids) < k {
+		best, bestD := 0, -1.0
+		for i, v := range vectors {
+			d := math.MaxFloat64
+			for _, c := range centroids {
+				if x := distVec(v, c); x < d {
+					d = x
+				}
+			}
+			if d > bestD {
+				best, bestD = i, d
+			}
+		}
+		centroids = append(centroids, append([]float64{}, vectors[best]...))
+	}
+	assign := make([]int, n)
+	for it := 0; it < iterations; it++ {
+		changed := false
+		for i, v := range vectors {
+			best, bestD := 0, math.MaxFloat64
+			for c, cent := range centroids {
+				if d := distVec(v, cent); d < bestD {
+					best, bestD = c, d
+				}
+			}
+			if best != assign[i] {
+				assign[i] = best
+				changed = true
+			}
+		}
+		for c := 0; c < k; c++ {
+			members := [][]float64{}
+			for i := range vectors {
+				if assign[i] == c {
+					members = append(members, vectors[i])
+				}
+			}
+			if len(members) > 0 {
+				centroids[c] = make([]float64, dim)
+				for _, m := range members {
+					for d := 0; d < dim; d++ {
+						centroids[c][d] += m[d]
+					}
+				}
+				for d := 0; d < dim; d++ {
+					centroids[c][d] /= float64(len(members))
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return centroids, assign
 }
 
 // GraphNode 是关系图谱中的一个节点。

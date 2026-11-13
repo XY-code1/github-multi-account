@@ -41,6 +41,7 @@ type AccountRow struct {
 	Group               string   `json:"group"`
 	Tags                []string `json:"tags"`
 	AvatarURL           string   `json:"avatar_url"`
+	ClusterLabel        string   `json:"cluster_label"`
 	Status              string   `json:"status"`
 	Error               string   `json:"error"`
 	LastSyncAt          string   `json:"last_sync_at"`
@@ -100,6 +101,10 @@ func QueryAccounts(db *sql.DB, accounts []config.Account, q AccountQuery) (*Acco
 		return nil, err
 	}
 	limits, err := AllRateLimits(db)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := AllProfiles(db)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +172,7 @@ func QueryAccounts(db *sql.DB, accounts []config.Account, q AccountQuery) (*Acco
 			Group:               a.Group,
 			Tags:                tags,
 			AvatarURL:           avatarFromPayload(s.Payload),
+			ClusterLabel:        profiles[a.ID].ClusterLabel,
 			Status:              status,
 			Error:               errMsg,
 			LastSyncAt:          st.LastSyncAt,

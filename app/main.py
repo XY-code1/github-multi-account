@@ -534,6 +534,19 @@ async def run_sync_now() -> dict[str, Any]:
     return {"ok": True, **result}
 
 
+@app.get("/api/profiles")
+async def profiles() -> dict[str, Any]:
+    """账号画像（按影响力 / 活跃度自动聚类，k-means）。"""
+    return dashboard.build_profiles()
+
+
+@app.post("/api/profiles/rebuild")
+async def rebuild_profiles() -> dict[str, Any]:
+    result = dashboard.build_profiles()
+    db.audit("profiles.rebuild", detail=f"账号画像重新聚类：{len(result['clusters'])} 个簇")
+    return result
+
+
 @app.get("/api/graph")
 async def graph() -> dict[str, Any]:
     """账号关系图谱（关注 / 共同仓库 / 共同关注）。"""

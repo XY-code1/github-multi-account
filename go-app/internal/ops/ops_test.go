@@ -314,6 +314,49 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 }
 
+func TestBuildProfiles(t *testing.T) {
+	cfg, cleanup := newTestEnv(t)
+	defer cleanup()
+	addAccounts(t, cfg, 3)
+	db := DB()
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 1, Username: "user1", Status: "invalid", Label: "账号1",
+		SyncedAt: "2026-01-02T00:00:00Z",
+	})
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 2, Username: "user2", Status: "active", Label: "账号2",
+		Followers: 1000, TotalStars: 500, PublicRepos: 50,
+		ReviewPRs: 5, MyPRs: 2, AssignedIssues: 3,
+		SyncedAt: "2026-01-02T00:00:00Z",
+	})
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 3, Username: "user3", Status: "active", Label: "账号3",
+		SyncedAt: "2026-01-02T00:00:00Z",
+	})
+
+	accounts, _ := cfg.Accounts()
+	result, err := BuildProfiles(db, accounts)
+	if err != nil {
+		t.Fatalf("画像聚类失败: %v", err)
+	}
+	if len(result.Clusters) != 3 || len(result.Accounts) != 3 {
+		t.Fatalf("簇/账号数不正确: %+v", result)
+	}
+	var top *ProfileAccount
+	for i := range result.Accounts {
+		if result.Accounts[i].AccountID == 2 {
+			top = &result.Accounts[i]
+		}
+	}
+	if top == nil || top.ClusterLabel != "核心" {
+		t.Fatalf("高活跃账号应归入核心: %+v", result.Accounts)
+	}
+	profiles, _ := AllProfiles(db)
+	if profiles[2].ClusterLabel != "核心" {
+		t.Fatalf("画像未入库: %+v", profiles)
+	}
+}
+
 func TestBuildGraph(t *testing.T) {
 	cfg, cleanup := newTestEnv(t)
 	defer cleanup()

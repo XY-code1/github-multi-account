@@ -422,6 +422,31 @@ def all_repos() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ------------------------------ 账号画像 ------------------------------
+
+def upsert_profile(account_id: int, cluster_index: int, cluster_label: str, features: str) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO account_profile (account_id, cluster_index, cluster_label, features, updated_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(account_id) DO UPDATE SET
+                 cluster_index=excluded.cluster_index, cluster_label=excluded.cluster_label,
+                 features=excluded.features, updated_at=excluded.updated_at
+            """,
+            (account_id, cluster_index, cluster_label, features, ts),
+        )
+
+
+def all_profiles() -> dict[int, dict]:
+    if not DB_FILE.exists():
+        return {}
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT account_id, cluster_index, cluster_label FROM account_profile").fetchall()
+    return {r["account_id"]: dict(r) for r in rows}
+
+
 # ------------------------------ 增量同步 ETag ------------------------------
 
 def get_etag(account_id: int, endpoint: str) -> str | None:

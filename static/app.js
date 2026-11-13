@@ -346,6 +346,7 @@ function renderAccountTable(items) {
       </td>
       <td>
         <span class="tag">${{ personal: "个人", bot: "Bot", org: "组织" }[a.type] || "个人"}</span>
+        ${a.cluster_label ? `<span class="tag tag-cluster">${escapeHtml(a.cluster_label)}</span>` : ""}
         ${a.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}
       </td>
       <td>
@@ -714,6 +715,53 @@ async function addWebhook() {
   renderWebhooks();
 }
 
+// ---------------- 账号画像 ----------------
+
+async function loadProfiles() {
+  try {
+    const data = await api("/api/profiles");
+    renderProfiles(data);
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function rebuildProfiles() {
+  const btn = document.getElementById("profileRebuildBtn");
+  btn.disabled = true;
+  try {
+    const data = await api("/api/profiles/rebuild", { method: "POST" });
+    showToast("账号画像已重新聚类");
+    renderProfiles(data);
+    await loadAccountsPage(false);
+  } catch (e) {
+    showToast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderProfiles(data) {
+  const box = document.getElementById("profileSummary");
+  if (!data.clusters.length) {
+    box.innerHTML = `<div class="empty-tab">暂无画像数据</div>`;
+    return;
+  }
+  const nameOf = (id) => {
+    const acc = (state.accounts?.items || []).find((a) => a.id === id);
+    return acc ? acc.username : `#${id}`;
+  };
+  box.innerHTML = `
+    <div class="stat-grid">${data.clusters.map((c) => `
+      <div class="stat-card"><span class="stat-num">${c.size}</span><span class="stat-label">${escapeHtml(c.label)}</span></div>`).join("")}
+    </div>
+    <div class="item-list">${data.accounts.map((a) => `
+      <div class="item">
+        <div class="item-body"><div class="item-title" style="font-weight:500">${escapeHtml(nameOf(a.account_id))}</div></div>
+        <span class="tag tag-cluster">${escapeHtml(a.cluster_label)}</span>
+      </div>`).join("")}</div>`;
+}
+
 // ---------------- 关系图谱 ----------------
 
 async function loadGraph() {
@@ -728,6 +776,7 @@ async function loadGraph() {
   } catch (e) {
     showToast(e.message);
   }
+  loadProfiles();
 }
 
 async function syncGraph() {
@@ -1714,6 +1763,7 @@ function bindEvents() {
   document.getElementById("syncAllAccountsBtn").addEventListener("click", syncAllAccounts);
   document.getElementById("webhookAddBtn").addEventListener("click", addWebhook);
   document.getElementById("graphSyncBtn").addEventListener("click", syncGraph);
+  document.getElementById("profileRebuildBtn").addEventListener("click", rebuildProfiles);
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

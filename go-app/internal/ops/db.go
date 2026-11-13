@@ -621,6 +621,51 @@ func AllRepos(db *sql.DB) ([]RepoRow, error) {
 	return out, rows.Err()
 }
 
+// ---------------- 账号画像 ----------------
+
+// ProfileRow 是一行账号画像（自动聚类结果）。
+type ProfileRow struct {
+	AccountID    int    `json:"account_id"`
+	ClusterIndex int    `json:"cluster_index"`
+	ClusterLabel string `json:"cluster_label"`
+	Features     string `json:"features"`
+	UpdatedAt    string `json:"updated_at"`
+}
+
+// UpsertProfile 写入账号画像。
+func UpsertProfile(db *sql.DB, p ProfileRow) error {
+	mu.Lock()
+	defer mu.Unlock()
+	_, err := db.Exec(`
+		INSERT INTO account_profile (account_id, cluster_index, cluster_label, features, updated_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(account_id) DO UPDATE SET
+			cluster_index=excluded.cluster_index, cluster_label=excluded.cluster_label,
+			features=excluded.features, updated_at=excluded.updated_at
+	`, p.AccountID, p.ClusterIndex, p.ClusterLabel, p.Features, p.UpdatedAt)
+	return err
+}
+
+// AllProfiles 返回全部账号画像，按账号 ID 索引。
+func AllProfiles(db *sql.DB) (map[int]ProfileRow, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	rows, err := db.Query(`SELECT account_id, cluster_index, cluster_label FROM account_profile`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[int]ProfileRow{}
+	for rows.Next() {
+		var p ProfileRow
+		if err := rows.Scan(&p.AccountID, &p.ClusterIndex, &p.ClusterLabel); err != nil {
+			return nil, err
+		}
+		out[p.AccountID] = p
+	}
+	return out, rows.Err()
+}
+
 // ---------------- 增量同步 ETag ----------------
 
 // GetETag 返回某账号某端点缓存的 ETag（无则空字符串）。

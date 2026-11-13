@@ -234,6 +234,7 @@ a:hover { text-decoration: underline; }
 /* ---------------- 标签补充 ---------------- */
 
 .tag-account { background: var(--accent-soft); color: var(--accent); }
+.tag-cluster { background: rgba(130, 80, 223, 0.14); color: var(--purple); font-weight: 600; }
 .tag.is-count { background: var(--bg-hover); color: var(--text); font-weight: 600; }
 .tag.is-success { background: var(--success-soft); color: var(--success); }
 .tag.is-danger { background: var(--danger-soft); color: var(--danger); }

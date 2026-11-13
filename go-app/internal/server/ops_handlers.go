@@ -150,6 +150,36 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) handleGetProfiles(w http.ResponseWriter, r *http.Request) {
+	accounts, err := s.cfg.Accounts()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	result, err := ops.BuildProfiles(s.opsDB, accounts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleRebuildProfiles(w http.ResponseWriter, r *http.Request) {
+	accounts, err := s.cfg.Accounts()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	result, err := ops.BuildProfiles(s.opsDB, accounts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	ops.Audit(s.opsDB, "profiles.rebuild", nil, "",
+		fmt.Sprintf("账号画像重新聚类：%d 个簇", len(result.Clusters)))
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 	accounts, err := s.cfg.Accounts()
 	if err != nil {

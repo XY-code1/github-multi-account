@@ -46,6 +46,7 @@ def _merged_rows() -> list[dict[str, Any]]:
     summaries = {s["account_id"]: s for s in db.all_summaries()}
     states = {s["account_id"]: s for s in db.all_sync_states()}
     limits = db.all_rate_limits()
+    profiles = db.all_profiles()
 
     rows = []
     for a in accounts:
@@ -69,6 +70,7 @@ def _merged_rows() -> list[dict[str, Any]]:
                 "group": a.get("group", ""),
                 "tags": a.get("tags", []),
                 "avatar_url": _avatar_url(s),
+                "cluster_label": (profiles.get(a["id"]) or {}).get("cluster_label", ""),
                 "status": status,
                 "error": s.get("error") or st.get("last_error"),
                 "last_sync_at": st.get("last_sync_at"),
