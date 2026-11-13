@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/github"
 )
 
 // Summary 是账号总览统计。
@@ -43,6 +44,8 @@ type Task struct {
 	AccountUsername string `json:"account_username"`
 	Time            string `json:"time"`
 	Action          string `json:"action"`
+	// URL 非空时表示这是一条跨账号关联事项，点击直接打开该链接
+	URL string `json:"url,omitempty"`
 }
 
 // Activity 是一条跨账号动态（重复活动已聚合，Count 表示同类条数）。
@@ -217,6 +220,76 @@ func BuildTasks(db *sql.DB, accounts []config.Account) ([]Task, error) {
 		}
 	}
 
+	// 跨账号关联：同一 PR / Issue 被多个账号看到时合并成一条，避免重复
+	type crossEntry struct {
+		accounts map[int]bool
+		item     github.IssueItem
+	}
+	itemAccounts := map[string]*crossEntry{}
+	addCross := func(aid int, it github.IssueItem) {
+		if it.HTMLURL == "" {
+			return
+		}
+		e := itemAccounts[it.HTMLURL]
+		if e == nil {
+			e = &crossEntry{accounts: map[int]bool{}, item: it}
+			itemAccounts[it.HTMLURL] = e
+		}
+		e.accounts[aid] = true
+	}
+	for otherID, s := range summaries {
+		if len(s.Payload) == 0 {
+			continue
+		}
+		var payload struct {
+			ReviewPRs      []github.IssueItem `json:"review_prs"`
+			MyPRs          []github.IssueItem `json:"my_prs"`
+			AssignedIssues []github.IssueItem `json:"assigned_issues"`
+		}
+		if json.Unmarshal(s.Payload, &payload) != nil {
+			continue
+		}
+		for _, it := range payload.ReviewPRs {
+			addCross(otherID, it)
+		}
+		for _, it := range payload.MyPRs {
+			addCross(otherID, it)
+		}
+		for _, it := range payload.AssignedIssues {
+			addCross(otherID, it)
+		}
+	}
+
+	for url, entry := range itemAccounts {
+		if len(entry.accounts) < 2 {
+			continue
+		}
+		ids := make([]int, 0, len(entry.accounts))
+		for aid := range entry.accounts {
+			ids = append(ids, aid)
+		}
+		sort.Ints(ids)
+		labels := make([]string, 0, len(ids))
+		for _, aid := range ids {
+			labels = append(labels, accountLabel(summaries[aid], accounts[aid]))
+		}
+		item := entry.item
+		tasks = append(tasks, Task{
+			ID:              "cross:" + url,
+			Type:            "cross_account",
+			TypeLabel:       "跨账号关联",
+			Priority:        "medium",
+			Title:           orString(item.Title, url),
+			Detail:          repoShort(item.RepositoryURL) + "#" + itoa(item.Number) + " · " + itoa(len(entry.accounts)) + " 个账号相关",
+			AccountID:       0,
+			AccountLabel:    strings.Join(labels, "、"),
+			AccountUsername: "",
+			Time:            item.CreatedAt,
+			Action:          "打开",
+			URL:             url,
+		})
+	}
+
 	sort.SliceStable(tasks, func(i, j int) bool {
 		pi := priorityOrder[tasks[i].Priority]
 		pj := priorityOrder[tasks[j].Priority]
@@ -347,4 +420,27 @@ func orString(v, def string) string {
 		return v
 	}
 	return def
+}
+
+// accountLabel 返回账号的展示名（缓存 label 优先，其次配置）。
+func accountLabel(s SummaryRow, acc config.Account) string {
+	if s.Label != "" {
+		return s.Label
+	}
+	if acc.Label != "" {
+		return acc.Label
+	}
+	if acc.Username != "" {
+		return acc.Username
+	}
+	return ""
+}
+
+// repoShort 从 repository_url 提取 owner/repo。
+func repoShort(url string) string {
+	parts := strings.Split(strings.Trim(url, "/"), "/")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	return url
 }

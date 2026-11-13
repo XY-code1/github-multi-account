@@ -209,17 +209,24 @@ function renderOverviewTasks(tasks) {
 
 function taskHtml(t) {
   const icon = {
-    credential: "🔑", quota: "📊", quota_capped: "🚫", review_pr: "👀", my_pr: "📤",
-    issue: "📋", sync_failed: "⚠", sync_stale: "🕘",
+    credential: "🔑", quota: "📊", quota_capped: "🚫", cross_account: "🔗",
+    review_pr: "👀", my_pr: "📤", issue: "📋", sync_failed: "⚠", sync_stale: "🕘",
   }[t.type] || "•";
   const accountTag = t.account_username
     ? `${escapeHtml(t.account_label)} · @${escapeHtml(t.account_username)}`
     : escapeHtml(t.account_label);
+  const isCross = t.type === "cross_account" && t.url;
+  const titleHtml = isCross
+    ? `<a class="task-title-link" href="${safeUrl(t.url)}" target="_blank" rel="noopener">${escapeHtml(t.title)}</a>`
+    : escapeHtml(t.title);
+  const actionHtml = isCross
+    ? `<a class="btn btn-sm" href="${safeUrl(t.url)}" target="_blank" rel="noopener">${escapeHtml(t.action)}</a>`
+    : `<button class="btn btn-sm" onclick="openAccountDetail(${t.account_id})">${escapeHtml(t.action)}</button>`;
   return `
     <div class="task" data-priority="${t.priority}">
       <div class="task-icon">${icon}</div>
       <div class="task-body">
-        <div class="task-title">${escapeHtml(t.title)}</div>
+        <div class="task-title">${titleHtml}</div>
         <div class="task-meta">
           <span class="tag">${escapeHtml(t.type_label || t.type)}</span>
           <span class="tag tag-account">${accountTag}</span>
@@ -229,7 +236,7 @@ function taskHtml(t) {
       </div>
       <div class="task-actions">
         <span class="prio prio-${t.priority}">${{ high: "高", medium: "中", low: "低" }[t.priority]}</span>
-        <button class="btn btn-sm" onclick="openAccountDetail(${t.account_id})">${escapeHtml(t.action)}</button>
+        ${actionHtml}
       </div>
     </div>`;
 }

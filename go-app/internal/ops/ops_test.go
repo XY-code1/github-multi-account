@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github-multi-account/internal/config"
@@ -310,6 +311,52 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 	if loaded := LoadSettings(dir); loaded.IntervalSeconds != 600 {
 		t.Fatalf("同步设置丢失: %+v", loaded)
+	}
+}
+
+func TestBuildTasksCrossAccount(t *testing.T) {
+	cfg, cleanup := newTestEnv(t)
+	defer cleanup()
+	addAccounts(t, cfg, 2)
+	db := DB()
+
+	item := github.IssueItem{
+		Title: "同一个 PR", HTMLURL: "https://github.com/o/r/pull/1",
+		RepositoryURL: "https://api.github.com/repos/o/r", Number: 1,
+		CreatedAt: "2026-01-02T00:00:00Z",
+	}
+	payload, err := json.Marshal(map[string]any{"review_prs": []any{item}})
+	if err != nil {
+		t.Fatalf("构造 payload 失败: %v", err)
+	}
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 1, Username: "user1", Status: "active", Label: "账号1",
+		Payload: payload, SyncedAt: "2026-01-02T00:00:00Z",
+	})
+	mustUpsertSummary(t, db, SummaryRow{
+		AccountID: 2, Username: "user2", Status: "active", Label: "账号2",
+		Payload: payload, SyncedAt: "2026-01-02T00:00:00Z",
+	})
+
+	accounts, _ := cfg.Accounts()
+	tasks, err := BuildTasks(db, accounts)
+	if err != nil {
+		t.Fatalf("生成待办失败: %v", err)
+	}
+	var cross []Task
+	for _, task := range tasks {
+		if task.Type == "cross_account" {
+			cross = append(cross, task)
+		}
+	}
+	if len(cross) != 1 {
+		t.Fatalf("应有 1 条跨账号关联待办: %+v", tasks)
+	}
+	if cross[0].URL != item.HTMLURL {
+		t.Fatalf("关联待办链接不正确: %q", cross[0].URL)
+	}
+	if !strings.Contains(cross[0].Detail, "2 个账号相关") {
+		t.Fatalf("关联详情不正确: %q", cross[0].Detail)
 	}
 }
 

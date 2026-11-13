@@ -1,6 +1,8 @@
 """全局聚合测试：账号总览、统一待办优先级、失败隔离。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app import config, dashboard, db, store, sync
@@ -98,6 +100,30 @@ def test_quota_capped_summary_and_task(populated):
     assert capped[0]["account_username"] == "good1"
     # 封顶的账号不再重复生成「配额不足」的中优先级待办
     assert not [t for t in tasks if t["type"] == "quota" and t["account_id"] == 2]
+
+
+def test_cross_account_related(populated):
+    """同一 PR 被多个账号看到时，合并成一条跨账号关联待办。"""
+    item = {
+        "title": "同一个 PR",
+        "html_url": "https://github.com/o/r/pull/1",
+        "repository_url": "https://api.github.com/repos/o/r",
+        "number": 1,
+        "created_at": "2026-01-02T00:00:00Z",
+    }
+    row = db.get_summary(2)
+    payload = json.loads(row["payload"] or "{}")
+    payload["review_prs"] = [item]
+    db.upsert_summary(2, "good1", payload)
+    db.upsert_summary(3, "good2", {"status": "active", "label": "好号B", "review_prs": [item]})
+
+    tasks = dashboard.build_tasks()
+    cross = [t for t in tasks if t["type"] == "cross_account"]
+    assert len(cross) == 1
+    assert cross[0]["account_label"] == "好号A、好号B"
+    assert "2 个账号相关" in cross[0]["detail"]
+    assert cross[0]["url"] == item["html_url"]
+    assert cross[0]["title"] == "同一个 PR"
 
 
 def test_task_includes_account_username(populated):

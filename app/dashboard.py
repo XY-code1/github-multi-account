@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import config, db
+from .service import repo_short
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ TASK_TYPES = {
     "credential": "凭据异常",
     "quota": "API 配额不足",
     "quota_capped": "API 已封顶",
+    "cross_account": "跨账号关联",
     "review_pr": "待我 Review 的 PR",
     "my_pr": "我发起的 PR",
     "issue": "分配给我的 Issue",
@@ -170,6 +172,45 @@ def build_tasks() -> list[dict[str, Any]]:
                                        f"上次同步 {synced_at}", label, aid, acc.get("username", ""), synced_at, "立即同步"))
             except ValueError:
                 pass
+
+    # 跨账号关联：同一 PR / Issue 被多个账号看到时，合并成一条待办，
+    # 避免同一个事项在不同账号下重复出现。
+    item_accounts: dict[str, dict[str, Any]] = {}
+    for other_id, s in summaries.items():
+        payload = _load_payload(s)
+        for key in ("review_prs", "my_prs", "assigned_issues"):
+            for it in payload.get(key, []):
+                url = it.get("html_url")
+                if not url:
+                    continue
+                entry = item_accounts.setdefault(url, {"accounts": set(), "item": it})
+                entry["accounts"].add(other_id)
+
+    def _label_of(aid: int) -> str:
+        s = summaries.get(aid, {})
+        acc = accounts.get(aid, {})
+        return s.get("label") or acc.get("label") or acc.get("username") or f"账号 {aid}"
+
+    for url, entry in item_accounts.items():
+        if len(entry["accounts"]) < 2:
+            continue
+        it = entry["item"]
+        ids_sorted = sorted(entry["accounts"])
+        tasks.append({
+            "id": f"cross:{url}",
+            "type": "cross_account",
+            "type_label": "跨账号关联",
+            "priority": "medium",
+            "title": it.get("title") or url,
+            "detail": f"{repo_short(it.get('repository_url', ''))}#{it.get('number', '')}"
+                      f" · {len(entry['accounts'])} 个账号相关",
+            "account_id": 0,
+            "account_label": "、".join(_label_of(aid) for aid in ids_sorted),
+            "account_username": "",
+            "time": it.get("created_at"),
+            "action": "打开",
+            "url": url,
+        })
 
     tasks.sort(key=lambda t: (PRIORITY_ORDER.get(t["priority"], 9), t.get("time") or ""))
     return tasks
