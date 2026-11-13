@@ -119,6 +119,7 @@ const SUBTITLES = {
   accounts: "全部账号",
   todos: "统一待办",
   automation: "自动化任务",
+  graph: "关系图谱",
   detail: "账号详情",
 };
 
@@ -136,6 +137,7 @@ function go(page) {
   }
   if (page === "todos") loadTodos();
   if (page === "automation") loadAutomation();
+  if (page === "graph") loadGraph();
 }
 
 // ---------------- 账号总览 ----------------
@@ -710,6 +712,113 @@ async function addWebhook() {
   state.webhooks.push({ name: name.trim(), url: url.trim(), events: [], enabled: true });
   await saveWebhooks();
   renderWebhooks();
+}
+
+// ---------------- 关系图谱 ----------------
+
+async function loadGraph() {
+  try {
+    const data = await api("/api/graph");
+    const badge = document.getElementById("graphBadge");
+    badge.textContent = data.edges.length;
+    badge.classList.toggle("hidden", data.edges.length === 0);
+    document.getElementById("graphNote").textContent =
+      `${data.nodes.length} 个账号 · ${data.edges.length} 条关系`;
+    renderGraph(data);
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function syncGraph() {
+  const btn = document.getElementById("graphSyncBtn");
+  btn.disabled = true;
+  btn.textContent = "同步中…";
+  try {
+    const r = await api("/api/graph/sync", { method: "POST" });
+    showToast(`关系数据同步完成：${r.total} 个账号`);
+    await loadGraph();
+  } catch (e) {
+    showToast(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "同步关系数据";
+  }
+}
+
+// 简单力导向布局：斥力 + 弹簧 + 向心，同步迭代后一次渲染
+function renderGraph(data) {
+  const svg = document.getElementById("graphCanvas");
+  const empty = document.getElementById("graphEmpty");
+  const nodes = data.nodes || [];
+  const edges = data.edges || [];
+  if (!nodes.length) {
+    svg.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  const W = svg.clientWidth || 900;
+  const H = 560;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  const byId = new Map();
+  nodes.forEach((n, i) => {
+    const angle = (i / Math.max(1, nodes.length)) * Math.PI * 2;
+    byId.set(n.id, {
+      ...n,
+      x: W / 2 + Math.cos(angle) * 150,
+      y: H / 2 + Math.sin(angle) * 150,
+      vx: 0, vy: 0,
+    });
+  });
+  const links = edges.filter((e) => byId.has(e.source) && byId.has(e.target));
+
+  for (let k = 0; k < 120; k++) {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = byId.get(nodes[i].id);
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = byId.get(nodes[j].id);
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const d2 = dx * dx + dy * dy || 1;
+        const d = Math.sqrt(d2);
+        const f = 2600 / d2;
+        a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+        b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+      }
+    }
+    for (const e of links) {
+      const a = byId.get(e.source), b = byId.get(e.target);
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const f = (d - 90) * 0.02;
+      a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+      b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+    }
+    for (const n of byId.values()) {
+      n.vx += (W / 2 - n.x) * 0.012;
+      n.vy += (H / 2 - n.y) * 0.012;
+      n.vx *= 0.85; n.vy *= 0.85;
+      n.x += Math.max(-8, Math.min(8, n.vx));
+      n.y += Math.max(-8, Math.min(8, n.vy));
+      n.x = Math.max(46, Math.min(W - 46, n.x));
+      n.y = Math.max(40, Math.min(H - 44, n.y));
+    }
+  }
+
+  const color = { follows: "var(--accent)", shared_repo: "var(--success)", shared_following: "var(--warning)" };
+  const clipDefs = nodes.map((n) => `<clipPath id="clip-${n.id}"><circle cx="${n.x}" cy="${n.y}" r="15"/></clipPath>`).join("");
+  const lines = links.map((e) => {
+    const a = byId.get(e.source), b = byId.get(e.target);
+    return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${color[e.type] || "var(--border)"}" stroke-width="1.4" opacity="0.55"><title>${escapeHtml(e.label)}</title></line>`;
+  }).join("");
+  const dots = nodes.map((n) => `
+    <g>
+      <circle cx="${n.x}" cy="${n.y}" r="15" fill="var(--bg)" stroke="var(--accent)" stroke-width="2"/>
+      ${n.avatar_url ? `<image href="${escapeHtml(n.avatar_url)}" x="${n.x - 15}" y="${n.y - 15}" width="30" height="30" clip-path="url(#clip-${n.id})" onerror="this.remove()"/>` : ""}
+      <text x="${n.x}" y="${n.y + 30}" text-anchor="middle" font-size="11" fill="var(--text)">${escapeHtml(n.username)}</text>
+    </g>`).join("");
+  svg.innerHTML = `<defs>${clipDefs}</defs>${lines}${dots}`;
 }
 
 // ---------------- 全部同步 ----------------
@@ -1604,6 +1713,7 @@ function bindEvents() {
   document.getElementById("batchGroup").addEventListener("click", batchGroup);
   document.getElementById("syncAllAccountsBtn").addEventListener("click", syncAllAccounts);
   document.getElementById("webhookAddBtn").addEventListener("click", addWebhook);
+  document.getElementById("graphSyncBtn").addEventListener("click", syncGraph);
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

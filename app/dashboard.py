@@ -216,6 +216,76 @@ def build_tasks() -> list[dict[str, Any]]:
     return tasks
 
 
+def build_graph() -> dict[str, Any]:
+    """账号关系图谱：关注边 + 共同仓库边 + 共同关注边。
+
+    节点是受管账号；边来自慢速同步入库的 follower/following 与代表仓库。
+    """
+    accounts = {a["id"]: a for a in config.load_accounts()}
+    social = db.all_social()
+    repos = db.all_repos()
+
+    avatars: dict[int, str] = {}
+    for s in db.all_summaries():
+        avatars[s["account_id"]] = (_load_payload(s).get("user") or {}).get("avatar_url") or ""
+
+    nodes = [
+        {
+            "id": aid,
+            "username": a.get("username", ""),
+            "label": a.get("label") or a.get("username"),
+            "avatar_url": avatars.get(aid, ""),
+        }
+        for aid, a in accounts.items()
+    ]
+
+    login_to_id = {a.get("username", "").lower(): aid for aid, a in accounts.items()}
+    following: dict[int, set[str]] = {}
+    for row in social:
+        if row["kind"] == "following":
+            following.setdefault(row["account_id"], set()).add(row["login"].lower())
+
+    edges: list[dict[str, Any]] = []
+    # 按 (节点对, 类型) 去重：同一对账号可能同时存在关注与共同仓库关系
+    seen: set[tuple[int, int, str]] = set()
+
+    def add_edge(src: int, dst: int, type_: str, label: str) -> None:
+        lo, hi = min(src, dst), max(src, dst)
+        if lo == hi:
+            return
+        key = (lo, hi, type_)
+        if key in seen:
+            return
+        seen.add(key)
+        edges.append({"source": lo, "target": hi, "type": type_, "label": label})
+
+    for aid, follows in following.items():
+        for login in follows:
+            target = login_to_id.get(login)
+            if target is not None:
+                add_edge(aid, target, "follows", "关注")
+
+    repo_owners: dict[str, set[int]] = {}
+    for row in repos:
+        repo_owners.setdefault(row["name"].lower(), set()).add(row["account_id"])
+    for name, owners in repo_owners.items():
+        if len(owners) < 2:
+            continue
+        ids = sorted(owners)
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                add_edge(ids[i], ids[j], "shared_repo", f"共同仓库 {name}")
+
+    ids = sorted(following)
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            common = following[ids[i]] & following[ids[j]]
+            if len(common) >= 3:
+                add_edge(ids[i], ids[j], "shared_following", f"共同关注 {len(common)}")
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def build_activities(limit: int = 100, type_filter: str = "all") -> list[dict[str, Any]]:
     """跨账号汇总最近动态（来自缓存的 events），并聚合重复活动。"""
     collected: list[dict[str, Any]] = []

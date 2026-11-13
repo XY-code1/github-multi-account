@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"sync"
 	"time"
+
+	"github-multi-account/internal/github"
 )
 
 // Schema 是运维中心的表结构（幂等）。
@@ -99,6 +101,15 @@ CREATE TABLE IF NOT EXISTS social (
 	PRIMARY KEY (account_id, kind, login)
 );
 CREATE INDEX IF NOT EXISTS idx_social_login ON social(login);
+
+CREATE TABLE IF NOT EXISTS account_repo (
+	account_id INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	stars INTEGER DEFAULT 0,
+	language TEXT,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (account_id, name)
+);
 
 CREATE TABLE IF NOT EXISTS account_profile (
 	account_id INTEGER PRIMARY KEY,
@@ -503,6 +514,109 @@ func ListWebhookLog(db *sql.DB, limit int) ([]WebhookLogItem, error) {
 		item.OK = ok == 1
 		item.Detail = det.String
 		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ---------------- 关系图谱数据 ----------------
+
+// SocialRow 是一条社交关系。
+type SocialRow struct {
+	AccountID int    `json:"account_id"`
+	Kind      string `json:"kind"`
+	Login     string `json:"login"`
+	AvatarURL string `json:"avatar_url"`
+}
+
+// RepoRow 是一个账号的代表仓库。
+type RepoRow struct {
+	AccountID int    `json:"account_id"`
+	Name      string `json:"name"`
+	Stars     int    `json:"stars"`
+	Language  string `json:"language"`
+}
+
+// ReplaceSocial 覆盖某账号某类型的社交关系。
+func ReplaceSocial(db *sql.DB, accountID int, kind string, entries []github.Person) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := db.Exec(`DELETE FROM social WHERE account_id=? AND kind=?`, accountID, kind); err != nil {
+		return err
+	}
+	ts := now()
+	for _, e := range entries {
+		if _, err := db.Exec(`INSERT INTO social (account_id, kind, login, avatar_url, updated_at) VALUES (?,?,?,?,?)`,
+			accountID, kind, e.Login, e.AvatarURL, ts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceRepos 覆盖某账号的代表仓库。
+func ReplaceRepos(db *sql.DB, accountID int, repos []github.Repo) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := db.Exec(`DELETE FROM account_repo WHERE account_id=?`, accountID); err != nil {
+		return err
+	}
+	ts := now()
+	for _, r := range repos {
+		if _, err := db.Exec(`INSERT INTO account_repo (account_id, name, stars, language, updated_at) VALUES (?,?,?,?,?)`,
+			accountID, r.Name, r.StargazersCount, r.Language, ts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CountSocial 返回社交关系记录数（用于判断是否需要首次同步）。
+func CountSocial(db *sql.DB) (int, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM social`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// AllSocial 返回全部社交关系。
+func AllSocial(db *sql.DB) ([]SocialRow, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	rows, err := db.Query(`SELECT account_id, kind, login, avatar_url FROM social`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []SocialRow{}
+	for rows.Next() {
+		var r SocialRow
+		if err := rows.Scan(&r.AccountID, &r.Kind, &r.Login, &r.AvatarURL); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AllRepos 返回全部账号仓库。
+func AllRepos(db *sql.DB) ([]RepoRow, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	rows, err := db.Query(`SELECT account_id, name, stars, language FROM account_repo`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []RepoRow{}
+	for rows.Next() {
+		var r RepoRow
+		if err := rows.Scan(&r.AccountID, &r.Name, &r.Stars, &r.Language); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

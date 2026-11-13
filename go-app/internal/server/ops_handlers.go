@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github-multi-account/internal/config"
 	"github-multi-account/internal/notify"
 	"github-multi-account/internal/ops"
 )
@@ -146,6 +148,58 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
+	accounts, err := s.cfg.Accounts()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	graph, err := ops.BuildGraph(s.opsDB, accounts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, graph)
+}
+
+// SyncGraph 慢速同步：拉取所有账号的粉丝 / 关注 / 代表仓库，返回账号数。
+func (s *Server) SyncGraph() (int, error) {
+	accounts, err := s.cfg.Accounts()
+	if err != nil {
+		return 0, err
+	}
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for _, a := range accounts {
+		wg.Add(1)
+		go func(acc config.Account) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			followers, following, repos, err := s.svc.FetchSocial(acc)
+			if err != nil {
+				return
+			}
+			_ = ops.ReplaceSocial(s.opsDB, acc.ID, "followers", followers)
+			_ = ops.ReplaceSocial(s.opsDB, acc.ID, "following", following)
+			_ = ops.ReplaceRepos(s.opsDB, acc.ID, repos)
+		}(a)
+	}
+	wg.Wait()
+	ops.Audit(s.opsDB, "graph.sync", nil, "", fmt.Sprintf("关系图谱同步 %d 个账号", len(accounts)))
+	return len(accounts), nil
+}
+
+// handleSyncGraph 慢速同步：拉取所有账号的粉丝 / 关注 / 代表仓库。
+func (s *Server) handleSyncGraph(w http.ResponseWriter, r *http.Request) {
+	total, err := s.SyncGraph()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total": total})
 }
 
 func (s *Server) handleGetWebhooks(w http.ResponseWriter, r *http.Request) {

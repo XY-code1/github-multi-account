@@ -116,6 +116,16 @@ CREATE TABLE IF NOT EXISTS social (
 );
 CREATE INDEX IF NOT EXISTS idx_social_login ON social(login);
 
+-- 账号画像：仓库（用于关系图谱的「共同仓库」边）
+CREATE TABLE IF NOT EXISTS account_repo (
+    account_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    stars INTEGER DEFAULT 0,
+    language TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, name)
+);
+
 -- 账号画像：自动聚类结果
 CREATE TABLE IF NOT EXISTS account_profile (
     account_id INTEGER PRIMARY KEY,
@@ -367,6 +377,48 @@ def list_webhook_log(limit: int = 50) -> list[dict[str, Any]]:
             "SELECT ts, url, event_type, ok, detail FROM webhook_log ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------ 关系图谱数据 ------------------------------
+
+def replace_social(account_id: int, kind: str, entries: list[dict]) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM social WHERE account_id=? AND kind=?", (account_id, kind))
+        for e in entries:
+            conn.execute(
+                "INSERT INTO social (account_id, kind, login, avatar_url, updated_at) VALUES (?,?,?,?,?)",
+                (account_id, kind, e.get("login", ""), e.get("avatar_url", ""), ts),
+            )
+
+
+def replace_repos(account_id: int, repos: list[dict]) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM account_repo WHERE account_id=?", (account_id,))
+        for r in repos:
+            conn.execute(
+                "INSERT INTO account_repo (account_id, name, stars, language, updated_at) VALUES (?,?,?,?,?)",
+                (account_id, r.get("name", ""), int(r.get("stargazers_count", 0)), r.get("language") or "", ts),
+            )
+
+
+def all_social() -> list[dict]:
+    if not DB_FILE.exists():
+        return []
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT account_id, kind, login, avatar_url FROM social").fetchall()
+    return [dict(r) for r in rows]
+
+
+def all_repos() -> list[dict]:
+    if not DB_FILE.exists():
+        return []
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT account_id, name, stars, language FROM account_repo").fetchall()
     return [dict(r) for r in rows]
 
 

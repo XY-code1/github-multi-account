@@ -123,6 +123,21 @@ def test_detect_events(populated):
     assert "account.capped" in [e[0] for e in events]
 
 
+def test_build_graph(populated):
+    """关系图谱：关注边 + 共同仓库边。"""
+    db.replace_social(2, "following", [{"login": "good2", "avatar_url": ""}])
+    db.replace_social(3, "following", [{"login": "good1", "avatar_url": ""}])
+    db.replace_repos(2, [{"name": "dotfiles", "stargazers_count": 5, "language": "Python"}])
+    db.replace_repos(3, [{"name": "dotfiles", "stargazers_count": 1, "language": "Python"}])
+
+    g = dashboard.build_graph()
+    assert len(g["nodes"]) == 3
+    types = {e["type"] for e in g["edges"]}
+    assert "follows" in types
+    assert "shared_repo" in types
+    assert any("dotfiles" in e["label"] for e in g["edges"] if e["type"] == "shared_repo")
+
+
 def test_cross_account_related(populated):
     """同一 PR 被多个账号看到时，合并成一条跨账号关联待办。"""
     item = {

@@ -367,6 +367,47 @@ func (s *Service) syncSummary(acc config.Account, etags map[string]string, previ
 	return st
 }
 
+// FetchSocial 拉取粉丝 / 关注 / 代表仓库（用于关系图谱，慢速同步）。
+func (s *Service) FetchSocial(acc config.Account) (followers, following []github.Person, repos []github.Repo, err error) {
+	if acc.Token == "" {
+		return nil, nil, nil, nil
+	}
+	c := github.New(acc.Token)
+	user, e := c.User()
+	if e != nil {
+		return nil, nil, nil, e
+	}
+	login := user.Login
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		v, _ := c.Followers(login, 100)
+		mu.Lock()
+		followers = v
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		v, _ := c.Following(login, 100)
+		mu.Lock()
+		following = v
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		v, _ := c.UserReposAll(login, 2, 3)
+		mu.Lock()
+		repos = v
+		mu.Unlock()
+	}()
+	wg.Wait()
+	return followers, following, repos, nil
+}
+
 // Detail 完整详情：概览 / PR / Issue / 动态 / 仓库 / 粉丝。
 func (s *Service) Detail(acc config.Account, forceRecord bool) *Status {
 	st := emptyStatus(acc)

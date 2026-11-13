@@ -301,6 +301,145 @@ func BuildTasks(db *sql.DB, accounts []config.Account) ([]Task, error) {
 	return tasks, nil
 }
 
+// GraphNode 是关系图谱中的一个节点。
+type GraphNode struct {
+	ID        int    `json:"id"`
+	Username  string `json:"username"`
+	Label     string `json:"label"`
+	AvatarURL string `json:"avatar_url"`
+}
+
+// GraphEdge 是关系图谱中的一条边。
+type GraphEdge struct {
+	Source int    `json:"source"`
+	Target int    `json:"target"`
+	Type   string `json:"type"`
+	Label  string `json:"label"`
+}
+
+// Graph 是账号关系图谱。
+type Graph struct {
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges"`
+}
+
+// BuildGraph 构建账号关系图谱：关注 / 共同仓库 / 共同关注。
+// 边数据来自慢速同步入库的 social 与 account_repo。
+func BuildGraph(db *sql.DB, accounts []config.Account) (*Graph, error) {
+	social, err := AllSocial(db)
+	if err != nil {
+		return nil, err
+	}
+	repos, err := AllRepos(db)
+	if err != nil {
+		return nil, err
+	}
+	summaries, err := AllSummaries(db)
+	if err != nil {
+		return nil, err
+	}
+	avatars := map[int]string{}
+	for _, s := range summaries {
+		var payload struct {
+			User *struct {
+				AvatarURL string `json:"avatar_url"`
+			} `json:"user"`
+		}
+		if len(s.Payload) > 0 && json.Unmarshal(s.Payload, &payload) == nil && payload.User != nil {
+			avatars[s.AccountID] = payload.User.AvatarURL
+		}
+	}
+
+	nodes := []GraphNode{}
+	for _, a := range accounts {
+		nodes = append(nodes, GraphNode{
+			ID: a.ID, Username: a.Username,
+			Label:     orString(a.Label, a.Username),
+			AvatarURL: avatars[a.ID],
+		})
+	}
+
+	loginToID := map[string]int{}
+	for _, a := range accounts {
+		loginToID[strings.ToLower(a.Username)] = a.ID
+	}
+	following := map[int]map[string]bool{}
+	for _, row := range social {
+		if row.Kind != "following" {
+			continue
+		}
+		if following[row.AccountID] == nil {
+			following[row.AccountID] = map[string]bool{}
+		}
+		following[row.AccountID][strings.ToLower(row.Login)] = true
+	}
+
+	edges := []GraphEdge{}
+	// 按 (节点对, 类型) 去重：同一对账号可能同时存在关注与共同仓库关系
+	seen := map[[3]int]bool{}
+	addEdge := func(src, dst, typeCode int, typ, label string) {
+		if src == dst {
+			return
+		}
+		lo, hi := src, dst
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		key := [3]int{lo, hi, typeCode}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		edges = append(edges, GraphEdge{Source: lo, Target: hi, Type: typ, Label: label})
+	}
+
+	for aid, follows := range following {
+		for login := range follows {
+			if target, ok := loginToID[login]; ok {
+				addEdge(aid, target, 1, "follows", "关注")
+			}
+		}
+	}
+
+	repoOwners := map[string][]int{}
+	for _, row := range repos {
+		key := strings.ToLower(row.Name)
+		repoOwners[key] = append(repoOwners[key], row.AccountID)
+	}
+	for name, owners := range repoOwners {
+		if len(owners) < 2 {
+			continue
+		}
+		sort.Ints(owners)
+		for i := 0; i < len(owners); i++ {
+			for j := i + 1; j < len(owners); j++ {
+				addEdge(owners[i], owners[j], 2, "shared_repo", "共同仓库 "+name)
+			}
+		}
+	}
+
+	ids := make([]int, 0, len(following))
+	for id := range following {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			common := 0
+			for login := range following[ids[i]] {
+				if following[ids[j]][login] {
+					common++
+				}
+			}
+			if common >= 3 {
+				addEdge(ids[i], ids[j], 3, "shared_following", "共同关注 "+itoa(common))
+			}
+		}
+	}
+
+	return &Graph{Nodes: nodes, Edges: edges}, nil
+}
+
 // BuildActivities 跨账号汇总最近动态（来自缓存的 events），并聚合重复活动。
 func BuildActivities(db *sql.DB, limit int, typeFilter string) ([]Activity, error) {
 	summaries, err := AllSummaries(db)

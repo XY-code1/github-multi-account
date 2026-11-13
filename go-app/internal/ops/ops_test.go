@@ -314,6 +314,34 @@ func TestSettingsSectionsDoNotOverwriteEachOther(t *testing.T) {
 	}
 }
 
+func TestBuildGraph(t *testing.T) {
+	cfg, cleanup := newTestEnv(t)
+	defer cleanup()
+	addAccounts(t, cfg, 3)
+	db := DB()
+
+	_ = ReplaceSocial(db, 1, "following", []github.Person{{Login: "user2"}})
+	_ = ReplaceSocial(db, 2, "following", []github.Person{{Login: "user1"}})
+	_ = ReplaceRepos(db, 1, []github.Repo{{Name: "dotfiles", StargazersCount: 5}})
+	_ = ReplaceRepos(db, 2, []github.Repo{{Name: "dotfiles", StargazersCount: 1}})
+
+	accounts, _ := cfg.Accounts()
+	g, err := BuildGraph(db, accounts)
+	if err != nil {
+		t.Fatalf("构建图谱失败: %v", err)
+	}
+	if len(g.Nodes) != 3 {
+		t.Fatalf("节点数应为 3，得到 %d", len(g.Nodes))
+	}
+	types := map[string]bool{}
+	for _, e := range g.Edges {
+		types[e.Type] = true
+	}
+	if !types["follows"] || !types["shared_repo"] {
+		t.Fatalf("缺少关注/共同仓库边: %+v", g.Edges)
+	}
+}
+
 func TestDetectSyncEvents(t *testing.T) {
 	prev := map[string]any{"review_prs_count": float64(2), "my_prs_count": float64(0)}
 	st := &service.Status{Status: "active", ReviewPRsCount: 3, MyPRsCount: 1}

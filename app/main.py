@@ -67,6 +67,12 @@ async def lifespan(app: FastAPI):
         sync_engine.start()
         logger.info("后台同步引擎已启动（间隔 %ss，并发 %s）",
                     sync_engine.cfg["interval_seconds"], sync_engine.cfg["concurrency"])
+        if not db.all_social():
+            try:
+                result = await sync_social_once()
+                logger.info("关系图谱初始同步完成：%d 个账号", result["total"])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("关系图谱初始同步失败: %s", e)
     logger.info("GitHub 多账号仪表盘已启动")
     yield
     await poller.stop()
@@ -526,6 +532,41 @@ async def run_sync_now() -> dict[str, Any]:
     result = await sync_engine.sync_all()
     db.audit("sync.run", detail="手动触发全量同步")
     return {"ok": True, **result}
+
+
+@app.get("/api/graph")
+async def graph() -> dict[str, Any]:
+    """账号关系图谱（关注 / 共同仓库 / 共同关注）。"""
+    return dashboard.build_graph()
+
+
+async def sync_social_once() -> dict[str, Any]:
+    """慢速同步：拉取所有账号的粉丝 / 关注 / 代表仓库，用于关系图谱。"""
+    accounts = config.load_accounts()
+    if not accounts:
+        return {"ok": True, "total": 0}
+    sem = asyncio.Semaphore(3)
+
+    async def one(acc: dict[str, Any]) -> None:
+        async with sem:
+            try:
+                data = await service.fetch_social(acc)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("账号 %s 关系同步失败: %s", acc.get("username"), e)
+                return
+            db.replace_social(acc["id"], "followers", data["followers"])
+            db.replace_social(acc["id"], "following", data["following"])
+            db.replace_repos(acc["id"], data["repos"])
+
+    await asyncio.gather(*(one(a) for a in accounts))
+    return {"ok": True, "total": len(accounts)}
+
+
+@app.post("/api/graph/sync")
+async def sync_graph() -> dict[str, Any]:
+    result = await sync_social_once()
+    db.audit("graph.sync", detail=f"关系图谱同步 {result['total']} 个账号")
+    return result
 
 
 @app.get("/api/webhooks")

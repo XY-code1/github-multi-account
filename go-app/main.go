@@ -148,6 +148,14 @@ func run(base string) error {
 		c := engine.Config()
 		log.Printf("后台同步引擎已启动（间隔 %ds，并发 %d）", c.IntervalSeconds, c.Concurrency)
 	}
+	// 关系图谱数据为空时先同步一次
+	if len(accounts) > 0 {
+		if n, err := ops.CountSocial(st.DB()); err == nil && n == 0 {
+			if total, err := srv.SyncGraph(); err == nil {
+				log.Printf("关系图谱初始同步完成：%d 个账号", total)
+			}
+		}
+	}
 	defer engine.Stop()
 
 	// 已有实例在运行时，只打开浏览器，避免启动第二个服务

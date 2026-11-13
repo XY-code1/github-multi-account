@@ -78,6 +78,7 @@
         <a class="nav-item" data-page="accounts"><span class="nav-icon">☰</span>全部账号</a>
         <a class="nav-item" data-page="todos"><span class="nav-icon">✓</span>统一待办<span id="todoBadge" class="count-badge hidden">0</span></a>
         <a class="nav-item" data-page="automation"><span class="nav-icon">⚙</span>自动化任务</a>
+        <a class="nav-item" data-page="graph"><span class="nav-icon">◈</span>关系图谱<span id="graphBadge" class="count-badge hidden">0</span></a>
       </nav>
     </aside>
 
@@ -253,6 +254,32 @@
           <p class="page-desc">把账号事件推送到外部系统（n8n / Zapier / 自建服务），事件在每次同步后检测。</p>
           <div id="webhookList"></div>
           <div id="webhookLog"></div>
+        </div>
+      </section>
+
+      <!-- ========== 关系图谱 ========== -->
+      <section id="page-graph" class="page">
+        <div class="page-head">
+          <h2>关系图谱</h2>
+          <p class="page-desc">账号之间的关注关系、共同仓库与共同关注</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>账号关系</h3>
+            <div class="chip-row">
+              <button id="graphSyncBtn" class="btn btn-sm">同步关系数据</button>
+              <span class="panel-note" id="graphNote"></span>
+            </div>
+          </div>
+          <div class="graph-legend">
+            <span><i class="dot dot-follows"></i>关注</span>
+            <span><i class="dot dot-repo"></i>共同仓库</span>
+            <span><i class="dot dot-common"></i>共同关注</span>
+          </div>
+          <div class="graph-wrap">
+            <svg id="graphCanvas" class="graph-canvas"></svg>
+            <div id="graphEmpty" class="empty-tab hidden">还没有关系数据，点「同步关系数据」拉取粉丝 / 关注 / 仓库</div>
+          </div>
         </div>
       </section>
 

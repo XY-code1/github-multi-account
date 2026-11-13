@@ -285,6 +285,30 @@ async def fetch_account_summary(
     return result
 
 
+async def fetch_social(account: dict[str, Any]) -> dict[str, Any]:
+    """拉取粉丝 / 关注 / 代表仓库（用于关系图谱，慢速同步）。"""
+    token = account.get("token", "")
+    if not token:
+        return {"followers": [], "following": [], "repos": []}
+    client = GitHubClient(token)
+    try:
+        user = await client.get_user()
+        login = user.get("login") or account.get("username", "")
+        results = await asyncio.gather(
+            client.get_followers(login),
+            client.get_following(login),
+            client.user_repos(login, 10),
+            return_exceptions=True,
+        )
+        return {
+            "followers": [] if isinstance(results[0], BaseException) else results[0],
+            "following": [] if isinstance(results[1], BaseException) else results[1],
+            "repos": [] if isinstance(results[2], BaseException) else results[2],
+        }
+    finally:
+        await client.aclose()
+
+
 async def fetch_account_detail(account: dict[str, Any], force_record: bool = False) -> dict[str, Any]:
     """完整详情：概览 / PR / Issue / 动态 / 仓库 / 粉丝。"""
     token = account.get("token", "")

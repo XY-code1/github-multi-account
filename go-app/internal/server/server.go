@@ -105,6 +105,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/webhooks", s.handleGetWebhooks)
 	s.mux.HandleFunc("POST /api/webhooks", s.handleSaveWebhooks)
 	s.mux.HandleFunc("GET /api/webhooks/log", s.handleWebhooksLog)
+	s.mux.HandleFunc("GET /api/graph", s.handleGetGraph)
+	s.mux.HandleFunc("POST /api/graph/sync", s.handleSyncGraph)
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /static/", s.handleStatic)
 }
