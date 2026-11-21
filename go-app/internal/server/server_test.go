@@ -12,6 +12,7 @@ import (
 	"testing/fstest"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/github"
 	"github-multi-account/internal/ops"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
@@ -366,5 +367,73 @@ func TestImportDocx(t *testing.T) {
 	}
 	if accounts[0].Username != "alice" || accounts[0].Label != "工作号" {
 		t.Fatalf("导入的账号信息不正确: %+v", accounts[0])
+	}
+}
+
+func TestWriteActionsRejectMissingAccount(t *testing.T) {
+	h := newTestHandler(t)
+	cases := []struct{ path, body string }{
+		{"/api/actions/star_repo", `{"accountId":999,"owner":"o","repo":"r"}`},
+		{"/api/actions/follow_user", `{"accountId":999,"username":"alice"}`},
+		{"/api/actions/create_pr", `{"accountId":999,"repo":"o/r","title":"t"}`},
+	}
+	for _, c := range cases {
+		w := do(h, http.MethodPost, c.path, c.body, nil)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s 应为 404，得到 %d: %s", c.path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestWriteActionsValidateParams(t *testing.T) {
+	h, cfg, _ := newTestEnv(t)
+	if _, err := cfg.Add(config.Account{Label: "u", Username: "u1", Token: "t"}); err != nil {
+		t.Fatalf("建账号失败: %v", err)
+	}
+	w := do(h, http.MethodPost, "/api/actions/star_repo", `{"accountId":1,"owner":"","repo":""}`, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("owner/repo 为空应为 400，得到 %d: %s", w.Code, w.Body.String())
+	}
+	w = do(h, http.MethodPost, "/api/actions/create_pr", `{"accountId":1,"repo":"bad","title":"t"}`, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非法 repo 应为 400，得到 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWriteActionWritesAudit(t *testing.T) {
+	old := github.BaseURL
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/rate_limit":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resources": map[string]any{"core": map[string]any{"limit": 5000, "remaining": 5000, "reset": 0}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/user/starred/o/r":
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPut && r.URL.Path == "/user/starred/o/r":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	github.BaseURL = srv.URL
+	defer func() { github.BaseURL = old }()
+
+	h, cfg, st := newTestEnv(t)
+	if _, err := cfg.Add(config.Account{Label: "u", Username: "u1", Token: "t"}); err != nil {
+		t.Fatalf("建账号失败: %v", err)
+	}
+	w := do(h, http.MethodPost, "/api/actions/star_repo", `{"accountId":1,"owner":"o","repo":"r"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("star_repo 应成功，得到 %d: %s", w.Code, w.Body.String())
+	}
+	items, err := ops.ListAudit(st.DB(), 10, "github.star")
+	if err != nil {
+		t.Fatalf("读取审计失败: %v", err)
+	}
+	if len(items) != 1 || items[0].Username != "u1" {
+		t.Fatalf("审计未正确写入: %+v", items)
 	}
 }

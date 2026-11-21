@@ -98,3 +98,31 @@ func TestToolBatchTag(t *testing.T) {
 		t.Fatalf("标签未写入: %+v", accounts[0].Tags)
 	}
 }
+
+func TestToolsIncludeWriteActions(t *testing.T) {
+	s := newTestServer(t)
+
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n"
+	var out bytes.Buffer
+	if err := s.serve(strings.NewReader(input), &out); err != nil {
+		t.Fatalf("serve 失败: %v", err)
+	}
+	for _, name := range []string{"star_repo", "follow_user", "create_pr"} {
+		if !strings.Contains(out.String(), `"name":"`+name+`"`) {
+			t.Fatalf("tools/list 缺少 %s: %s", name, out.String())
+		}
+	}
+}
+
+func TestWriteToolRejectsMissingAccount(t *testing.T) {
+	s := newTestServer(t)
+
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"star_repo","arguments":{"accountId":999,"owner":"o","repo":"r"}}}` + "\n"
+	var out bytes.Buffer
+	if err := s.serve(strings.NewReader(input), &out); err != nil {
+		t.Fatalf("serve 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "账号 999 不存在") {
+		t.Fatalf("应提示账号不存在: %s", out.String())
+	}
+}

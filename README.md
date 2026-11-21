@@ -48,10 +48,11 @@
 
 - **增量同步** —— GitHub 客户端带 ETag 发条件请求，未变化（304）不消耗 API 配额；几百个账号时配额消耗可降一个数量级
 - **跨账号去重** —— 同一个 PR / Issue 被多个账号看到时合并成一条待办，标注「N 个账号相关」
-- **MCP Server** —— `GitHub仪表盘.exe --mcp` 以 stdio 暴露 MCP 工具（查待办、账号列表、总览、详情、同步、批量打标签、审计），供 Claude / Cursor 直接调用
+- **MCP Server** —— `GitHub仪表盘.exe --mcp` 以 stdio 暴露 MCP 工具（查待办、账号列表、总览、详情、同步、批量打标签、审计，以及 star 仓库 / 关注用户 / 创建 PR），供 Claude / Cursor 直接调用
 - **出站 Webhook** —— 把账号事件（PR/Issue 增加、凭据失效、封顶、同步失败）推送到 n8n / Zapier / 自建服务，带投递日志
 - **账号关系图谱** —— 关注关系、共同仓库、共同关注三类边，SVG 力导向布局展示
 - **账号画像自动聚类** —— 按粉丝 / Star / 仓库 / 参与度 / 活跃度做 k-means 分群（核心 / 活跃 / 沉寂），作为打标签参考
+- **主动操作** —— 以指定账号 Star 仓库、关注用户、创建 Pull Request（同仓库分支或 fork 两种模式），写操作前做配额预检，star / follow / PR 均幂等，全部记审计
 - **主题切换** —— 浅色 / 深色一键切换，默认跟随系统偏好，自动记忆
 - **键盘快捷键** —— 刷新、切标签页、账号导航等全流程键盘操作
 
@@ -96,6 +97,8 @@ uvicorn app.main:app --reload --port 8000
 在 GitHub → Settings → Developer settings → Personal access tokens 创建。
 
 **Fine-grained token**（推荐）：至少勾选 Public Repository 的 `Pull requests`、`Issues`、`Contents`、`Metadata`（只读）。
+
+如果要用 Star / 关注 / 创建 PR 这类写操作，还需要给对应仓库的 `Contents`（读写，用于建分支 / 提交文件）与 `Pull requests`（读写）权限；只读 Token 执行写操作会返回 403。
 
 **Classic token**：`repo:status`、`read:user`、`read:project` 即可；公开仓库用 `public_repo` 也够。
 
@@ -167,6 +170,41 @@ accounts:
 | GET | `/api/webhooks` | 出站 Webhook 配置与事件类型 |
 | POST | `/api/webhooks` | 保存出站 Webhook 配置 |
 | GET | `/api/webhooks/log` | Webhook 投递日志 |
+| POST | `/api/actions/star_repo` | 以指定账号 Star 仓库（幂等） |
+| POST | `/api/actions/follow_user` | 以指定账号关注用户（幂等） |
+| POST | `/api/actions/create_pr` | 以指定账号创建 Pull Request（同仓库 / fork 两种模式） |
+
+### 主动操作（Star / Follow / 创建 PR）
+
+三个写操作端点都接收 `accountId`，用该账号自己的 Token 执行，行为一致：
+
+- 先做**配额预检**：core 剩余 < 50 次时直接拒绝（返回 403），避免写操作打穿后台同步的配额；
+- **幂等**：重复 star / follow 无副作用；创建 PR 前会先查同源同目标的开 PR，存在则直接返回该 PR（`action=existing`）；
+- 命中 403 / 429 时把 `Retry-After` 或 `X-RateLimit-Reset` 换算成等待秒数返回；
+- 全部写入审计日志（`github.star` / `github.follow` / `github.create_pr`）。
+
+```jsonc
+// POST /api/actions/star_repo
+{ "accountId": 1, "owner": "torvalds", "repo": "linux" }
+
+// POST /api/actions/follow_user
+{ "accountId": 1, "username": "octocat" }
+
+// POST /api/actions/create_pr（fork 模式：自动 fork + 建分支 + 提交文件）
+{
+  "accountId": 1,
+  "repo": "owner/repo",
+  "title": "修复 xxx",
+  "base": "main",          // 可选，默认取仓库默认分支
+  "fork": true,            // true=自动 fork 后提 PR；false=同仓库分支（需写权限）
+  "branch": "fix/xxx",     // 与 filePath/fileContent 一起用时必填
+  "filePath": "README.md",
+  "fileContent": "新内容",
+  "draft": false
+}
+```
+
+MCP 工具 `star_repo` / `follow_user` / `create_pr` 与这三个端点一一对应。
 
 ### MCP Server（给 AI 助手调用）
 
@@ -176,7 +214,7 @@ exe 内置 MCP 服务，可让 Claude / Cursor 直接操作运维中心：
 GitHub仪表盘.exe --mcp
 ```
 
-把它配置成 MCP 客户端的 stdio 服务即可。支持的工具：`list_accounts`、`get_todos`、`get_summary`、`get_account_detail`、`sync_account`、`sync_all`、`batch_tag`、`get_audit`。
+把它配置成 MCP 客户端的 stdio 服务即可。支持的工具：`list_accounts`、`get_todos`、`get_summary`、`get_account_detail`、`sync_account`、`sync_all`、`batch_tag`、`get_audit`，以及写操作 `star_repo`（参数 `accountId` / `owner` / `repo`）、`follow_user`（`accountId` / `username`）、`create_pr`（`accountId` / `repo` / `title`，可选 `base` / `head` / `body` / `draft` / `fork` / `branch` / `filePath` / `fileContent`）。写操作同样先做配额预检并记审计。
 | GET | `/api/tasks` | 同步引擎进度与配置 |
 | POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 |
 | POST | `/api/sync/run` | 立即触发全量同步 |

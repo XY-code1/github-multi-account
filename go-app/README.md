@@ -68,7 +68,7 @@ config\.secret.key        （本机密钥，必须一起复制）
 - 跨账号待办去重、关系图谱（关注 / 共同仓库 / 共同关注）
 - 账号画像自动聚类（核心 / 活跃 / 沉寂）
 - 出站 Webhook（事件推送到 n8n / Zapier / 自建服务）
-- MCP Server：`GitHub仪表盘.exe --mcp` 以 stdio 暴露工具给 Claude / Cursor
+- MCP Server：`GitHub仪表盘.exe --mcp` 以 stdio 暴露工具给 Claude / Cursor（只读：`list_accounts` / `get_todos` / `get_summary` / `get_account_detail` / `sync_account` / `sync_all` / `batch_tag` / `get_audit`；写操作：`star_repo` / `follow_user` / `create_pr`，写前做配额预检并记审计）
 - 主题切换、键盘快捷键、变化桌面提醒
 - 版本号显示 + 更新检查
 

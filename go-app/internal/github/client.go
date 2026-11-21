@@ -2,12 +2,15 @@
 package github
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -39,14 +42,10 @@ func (c *Client) getRaw(path string, params url.Values, etag string) ([]byte, st
 	if len(params) > 0 {
 		u += "?" + params.Encode()
 	}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := c.newRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, "", false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "github-account-dashboard")
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
@@ -81,6 +80,144 @@ func (c *Client) getRaw(path string, params url.Values, etag string) ([]byte, st
 		return nil, "", false, &Error{resp.StatusCode, fmt.Sprintf("GitHub API 错误 (HTTP %d)", resp.StatusCode)}
 	}
 	return body, newETag, true, nil
+}
+
+// newRequest 构造一个带通用鉴权头的请求。u 为完整 URL。
+func (c *Client) newRequest(method, u string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, u, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "github-account-dashboard")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
+// send 发起写请求（POST/PUT/DELETE），返回响应体、状态码与响应头。
+// 401/403/429 会被翻译成带配额提示的 *Error，其余状态码由调用方判断。
+func (c *Client) send(method, path string, payload any) ([]byte, int, http.Header, error) {
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := c.newRequest(method, BaseURL+path, body)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return nil, resp.StatusCode, resp.Header, &Error{401, "Token 无效或已过期"}
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		msg := "API 速率限制或权限不足"
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			if s, ok := m["message"].(string); ok && s != "" {
+				msg = s
+			}
+		}
+		if hint := rateLimitHint(resp.Header); hint != "" {
+			msg += "（" + hint + "）"
+		}
+		return nil, resp.StatusCode, resp.Header, &Error{resp.StatusCode, msg}
+	}
+	return raw, resp.StatusCode, resp.Header, nil
+}
+
+// sendJSON 发起写请求并按 okCodes 校验状态码，成功时把响应解析进 out。
+func (c *Client) sendJSON(method, path string, payload, out any, okCodes ...int) error {
+	raw, status, _, err := c.send(method, path, payload)
+	if err != nil {
+		return err
+	}
+	if !containsInt(okCodes, status) {
+		return &Error{status, fmt.Sprintf("GitHub API 错误 (HTTP %d)", status)}
+	}
+	if out == nil || len(raw) == 0 {
+		return nil
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// getStatus 发起 GET 并返回状态码（404 等不抛错，供幂等判断使用）。
+func (c *Client) getStatus(path string) (int, []byte, error) {
+	req, err := c.newRequest(http.MethodGet, BaseURL+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return resp.StatusCode, nil, &Error{401, "Token 无效或已过期"}
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		msg := "API 速率限制或权限不足"
+		var m map[string]any
+		if json.Unmarshal(raw, &m) == nil {
+			if s, ok := m["message"].(string); ok && s != "" {
+				msg = s
+			}
+		}
+		if hint := rateLimitHint(resp.Header); hint != "" {
+			msg += "（" + hint + "）"
+		}
+		return resp.StatusCode, nil, &Error{resp.StatusCode, msg}
+	}
+	return resp.StatusCode, raw, nil
+}
+
+func containsInt(list []int, v int) bool {
+	for _, n := range list {
+		if n == v {
+			return true
+		}
+	}
+	return false
+}
+
+// rateLimitHint 从响应头提取配额剩余与可重试等待时间。
+func rateLimitHint(h http.Header) string {
+	var parts []string
+	if remaining := h.Get("X-RateLimit-Remaining"); remaining != "" {
+		parts = append(parts, "剩余 "+remaining+" 次")
+	}
+	if wait := retryAfterSeconds(h); wait > 0 {
+		parts = append(parts, fmt.Sprintf("约 %d 秒后可重试", int(wait)))
+	}
+	return strings.Join(parts, "，")
+}
+
+// retryAfterSeconds 优先用 Retry-After，其次用 X-RateLimit-Reset 计算。
+func retryAfterSeconds(h http.Header) float64 {
+	if raw := h.Get("Retry-After"); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil {
+			return v
+		}
+	}
+	if raw := h.Get("X-RateLimit-Reset"); raw != "" {
+		if reset, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return math.Max(0, float64(reset-time.Now().Unix()))
+		}
+	}
+	return 0
 }
 
 func (c *Client) get(path string, params url.Values, out any) error {

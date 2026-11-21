@@ -21,7 +21,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, dashboard, db, docx, notify, service, store, sync, webhook
+from . import actions, config, dashboard, db, docx, notify, service, store, sync, webhook
+from .github import GitHubError
 from .query import query_accounts
 
 logger = logging.getLogger("ghdashboard")
@@ -471,12 +472,105 @@ async def import_docx(
 @app.post("/api/accounts/{account_id}/sync")
 async def sync_one_account(account_id: int) -> dict[str, Any]:
     """立即同步单个账号。"""
+    target = _require_account(account_id)
+    result = await sync_engine.sync_account(target)
+    db.audit("accounts.sync", account_id=account_id, username=target["username"], detail="手动同步")
+    return result
+
+
+# ------------------------------ 写操作（Star / Follow / PR） ------------------------------
+
+class StarRepoIn(BaseModel):
+    accountId: int
+    owner: str
+    repo: str
+
+
+class FollowUserIn(BaseModel):
+    accountId: int
+    username: str
+
+
+class CreatePRIn(BaseModel):
+    accountId: int
+    repo: str
+    title: str
+    base: str = ""
+    head: str = ""
+    body: str = ""
+    draft: bool = False
+    fork: bool = False
+    branch: str = ""
+    filePath: str = ""
+    fileContent: str = ""
+
+
+def _require_account(account_id: int) -> dict[str, Any]:
     accounts = config.load_accounts()
     target = next((a for a in accounts if a["id"] == account_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="账号不存在")
-    result = await sync_engine.sync_account(target)
-    db.audit("accounts.sync", account_id=account_id, username=target["username"], detail="手动同步")
+    return target
+
+
+def _action_http_status(exc: GitHubError) -> int:
+    return exc.status if exc.status in (400, 401, 403, 404, 422) else 502
+
+
+@app.post("/api/actions/star_repo")
+async def action_star_repo(payload: StarRepoIn) -> dict[str, Any]:
+    """以指定账号 Star 仓库（幂等，写操作前做配额预检）。"""
+    target = _require_account(payload.accountId)
+    try:
+        result = await actions.star_repo(target, payload.owner.strip(), payload.repo.strip())
+    except actions.ActionError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from e
+    except GitHubError as e:
+        raise HTTPException(status_code=_action_http_status(e), detail=e.message) from e
+    db.audit("github.star", account_id=target["id"], username=target["username"],
+             detail=f"star {payload.owner.strip()}/{payload.repo.strip()}")
+    return result
+
+
+@app.post("/api/actions/follow_user")
+async def action_follow_user(payload: FollowUserIn) -> dict[str, Any]:
+    """以指定账号关注用户（幂等，写操作前做配额预检）。"""
+    target = _require_account(payload.accountId)
+    try:
+        result = await actions.follow_user(target, payload.username.strip())
+    except actions.ActionError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from e
+    except GitHubError as e:
+        raise HTTPException(status_code=_action_http_status(e), detail=e.message) from e
+    db.audit("github.follow", account_id=target["id"], username=target["username"],
+             detail=f"关注 {payload.username.strip()}")
+    return result
+
+
+@app.post("/api/actions/create_pr")
+async def action_create_pr(payload: CreatePRIn) -> dict[str, Any]:
+    """以指定账号创建 Pull Request（支持同仓库分支与 fork 两种模式）。"""
+    target = _require_account(payload.accountId)
+    try:
+        result = await actions.create_pr(
+            target,
+            payload.repo.strip(),
+            payload.title.strip(),
+            base=payload.base.strip(),
+            head=payload.head.strip(),
+            body=payload.body,
+            draft=payload.draft,
+            fork=payload.fork,
+            branch=payload.branch.strip(),
+            file_path=payload.filePath.strip(),
+            file_content=payload.fileContent,
+        )
+    except actions.ActionError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from e
+    except GitHubError as e:
+        raise HTTPException(status_code=_action_http_status(e), detail=e.message) from e
+    db.audit("github.create_pr", account_id=target["id"], username=target["username"],
+             detail=f"创建 PR：{payload.repo.strip()}（{result.get('action')}）")
     return result
 
 

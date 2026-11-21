@@ -15,8 +15,10 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"github-multi-account/internal/config"
+	"github-multi-account/internal/github"
 	"github-multi-account/internal/ops"
 	"github-multi-account/internal/service"
 	"github-multi-account/internal/store"
@@ -242,7 +244,57 @@ func (s *Server) registerTools() {
 			}),
 			handle: s.handleGetAudit,
 		},
+		{
+			name:        "star_repo",
+			description: "以指定账号 Star 仓库（幂等，重复执行无副作用）",
+			schema: typedSchema(map[string]any{
+				"accountId": "账号 ID（必填）",
+				"owner":     "仓库所有者（必填）",
+				"repo":      "仓库名（必填）",
+			}, map[string]string{"accountId": "number"}),
+			handle: s.handleStarRepo,
+		},
+		{
+			name:        "follow_user",
+			description: "以指定账号关注用户（幂等）",
+			schema: typedSchema(map[string]any{
+				"accountId": "账号 ID（必填）",
+				"username":  "要关注的用户名（必填）",
+			}, map[string]string{"accountId": "number"}),
+			handle: s.handleFollowUser,
+		},
+		{
+			name:        "create_pr",
+			description: "以指定账号创建 Pull Request（支持同仓库分支与 fork 两种模式；已存在同源同目标的开 PR 时直接返回该 PR）",
+			schema: typedSchema(map[string]any{
+				"accountId":   "账号 ID（必填）",
+				"repo":        "目标仓库 owner/repo（必填）",
+				"title":       "PR 标题（必填）",
+				"base":        "目标分支，默认取仓库默认分支",
+				"head":        "源分支名（同仓库模式为该分支名；fork 模式为 fork 内分支名）",
+				"body":        "PR 正文",
+				"draft":       "是否创建为 Draft",
+				"fork":        "为 true 时自动 fork 后用 login:branch 作为 head",
+				"branch":      "需要提交文件时的目标分支（与 filePath/fileContent 一起用）",
+				"filePath":    "要提交的文件路径（可选）",
+				"fileContent": "文件内容（可选）",
+			}, map[string]string{"accountId": "number", "draft": "boolean", "fork": "boolean"}),
+			handle: s.handleCreatePR,
+		},
 	}
+}
+
+// typedSchema 生成带类型标注的 object schema（objectSchema 只支持 string）。
+func typedSchema(props map[string]any, types map[string]string) map[string]any {
+	properties := map[string]any{}
+	for k, v := range props {
+		t := types[k]
+		if t == "" {
+			t = "string"
+		}
+		properties[k] = map[string]any{"type": t, "description": fmt.Sprint(v)}
+	}
+	return map[string]any{"type": "object", "properties": properties, "required": []string{}}
 }
 
 func objectSchema(props map[string]any) map[string]any {
@@ -408,6 +460,79 @@ func (s *Server) handleGetAudit(_ context.Context, args map[string]any) (string,
 		return "", err
 	}
 	return textResult(map[string]any{"items": items, "total": len(items)})
+}
+
+func (s *Server) accountRef(acc config.Account) github.AccountRef {
+	return github.AccountRef{ID: acc.ID, Username: acc.Username, Token: acc.Token}
+}
+
+func (s *Server) handleStarRepo(_ context.Context, args map[string]any) (string, error) {
+	acc, err := s.findAccount(int(numArg(args, "accountId")))
+	if err != nil {
+		return "", err
+	}
+	owner := strArg(args, "owner")
+	repo := strArg(args, "repo")
+	if owner == "" || repo == "" {
+		return "", fmt.Errorf("owner 与 repo 不能为空")
+	}
+	result, err := github.StarRepo(s.accountRef(acc), owner, repo)
+	if err != nil {
+		return "", err
+	}
+	ops.Audit(s.db, "github.star", &acc.ID, acc.Username, "MCP star "+owner+"/"+repo)
+	return textResult(result)
+}
+
+func (s *Server) handleFollowUser(_ context.Context, args map[string]any) (string, error) {
+	acc, err := s.findAccount(int(numArg(args, "accountId")))
+	if err != nil {
+		return "", err
+	}
+	login := strArg(args, "username")
+	if login == "" {
+		return "", fmt.Errorf("username 不能为空")
+	}
+	result, err := github.FollowUser(s.accountRef(acc), login)
+	if err != nil {
+		return "", err
+	}
+	ops.Audit(s.db, "github.follow", &acc.ID, acc.Username, "MCP 关注 "+login)
+	return textResult(result)
+}
+
+func (s *Server) handleCreatePR(ctx context.Context, args map[string]any) (string, error) {
+	acc, err := s.findAccount(int(numArg(args, "accountId")))
+	if err != nil {
+		return "", err
+	}
+	repo := strArg(args, "repo")
+	title := strArg(args, "title")
+	if repo == "" || title == "" {
+		return "", fmt.Errorf("repo 与 title 不能为空")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	result, err := github.CreatePR(ctx, s.accountRef(acc), repo, title, github.CreatePROptions{
+		Base:     strArg(args, "base"),
+		Head:     strArg(args, "head"),
+		Body:     strArg(args, "body"),
+		Draft:    boolArg(args, "draft"),
+		Fork:     boolArg(args, "fork"),
+		Branch:   strArg(args, "branch"),
+		FilePath: strArg(args, "filePath"),
+		Content:  strArg(args, "fileContent"),
+	})
+	if err != nil {
+		return "", err
+	}
+	ops.Audit(s.db, "github.create_pr", &acc.ID, acc.Username, "MCP 创建 PR："+repo)
+	return textResult(result)
+}
+
+func boolArg(args map[string]any, key string) bool {
+	v, _ := args[key].(bool)
+	return v
 }
 
 func strArg(args map[string]any, key string) string {

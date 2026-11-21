@@ -226,3 +226,67 @@ def test_webhook_dispatch_and_log(client):
         assert log["items"][0]["event_type"] == "review_pr.added"
     finally:
         server.shutdown()
+
+
+# ------------------------------ 写操作 API（Star / Follow / PR） ------------------------------
+
+import httpx  # noqa: E402
+
+from app import actions  # noqa: E402
+from app.github import GitHubClient  # noqa: E402
+
+
+def _mock_github(handler, calls: list | None = None) -> GitHubClient:
+    def dispatch(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append((request.method, request.url.path))
+        return handler(request)
+
+    return GitHubClient("ghp_test", transport=httpx.MockTransport(dispatch))
+
+
+def _quota(remaining: int = 5000) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"resources": {"core": {"limit": 5000, "remaining": remaining, "reset": 0}}},
+    )
+
+
+def test_action_star_repo_missing_account(client):
+    resp = client.post("/api/actions/star_repo", json={"accountId": 999, "owner": "o", "repo": "r"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "账号不存在"
+
+
+def test_action_follow_user_missing_account(client):
+    resp = client.post("/api/actions/follow_user", json={"accountId": 999, "username": "alice"})
+    assert resp.status_code == 404
+
+
+def test_action_create_pr_rejects_bad_repo(client):
+    config.add_account("测试号", "api-u", "ghp_fake")
+    resp = client.post(
+        "/api/actions/create_pr",
+        json={"accountId": 1, "repo": "bad-format", "title": "t"},
+    )
+    assert resp.status_code == 400
+    assert "owner/repo" in resp.json()["detail"]
+
+
+def test_action_write_is_audited(client, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rate_limit":
+            return _quota()
+        if request.method == "GET" and request.url.path == "/user/starred/o/r":
+            return httpx.Response(404)
+        if request.method == "PUT" and request.url.path == "/user/starred/o/r":
+            return httpx.Response(204)
+        return httpx.Response(500)
+
+    monkeypatch.setattr(actions, "GitHubClient", lambda token, **kw: _mock_github(handler))
+    config.add_account("审计号", "audit-u", "ghp_fake")
+    resp = client.post("/api/actions/star_repo", json={"accountId": 1, "owner": "o", "repo": "r"})
+    assert resp.status_code == 200
+    items = client.get("/api/audit?action=github.star").json()["items"]
+    assert items and items[0]["username"] == "audit-u" and items[0]["account_id"] == 1
+    assert "o/r" in items[0]["detail"]
