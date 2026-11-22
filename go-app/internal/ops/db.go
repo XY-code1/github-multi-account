@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS webhook_log (
 CREATE TABLE IF NOT EXISTS email_messages (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	account_id INTEGER,
+	inbox_id INTEGER,
 	email TEXT,
 	message_id TEXT,
 	sender TEXT,
@@ -139,6 +140,14 @@ CREATE TABLE IF NOT EXISTS email_messages (
 	body TEXT,
 	code TEXT,
 	received_at TEXT,
+	created_at TEXT
+);
+
+-- 邮箱面板：独立邮箱清单（不依赖账号，如邮笺导出的取件链接）
+CREATE TABLE IF NOT EXISTS email_inboxes (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	email TEXT,
+	url TEXT,
 	created_at TEXT
 );
 `
@@ -168,6 +177,24 @@ func Init(db *sql.DB) error {
 	defer mu.Unlock()
 	if _, err := db.Exec(Schema); err != nil {
 		return err
+	}
+	// 轻量迁移：旧库补列（CREATE IF NOT EXISTS 不会改已有表结构）
+	rows, err := db.Query("PRAGMA table_info(email_messages)")
+	if err == nil {
+		defer rows.Close()
+		hasInbox := false
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dflt any
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err == nil && name == "inbox_id" {
+				hasInbox = true
+			}
+		}
+		if !hasInbox {
+			_, _ = db.Exec("ALTER TABLE email_messages ADD COLUMN inbox_id INTEGER")
+		}
 	}
 	dbh = db
 	return nil

@@ -122,6 +122,32 @@ def build_fetch_url(email: str, cfg: dict[str, Any]) -> str:
     return template.replace("{email}", quote(target, safe=""))
 
 
+INBOX_PAGE_RE = re.compile(r"^(https?)://([^/]+)/m/([^/?#]+)/?$")
+
+
+def normalize_fetch_url(url: str, cfg: dict[str, Any]) -> str:
+    """把邮笺的网页链接（/m/{token}）规范化为取件 JSON 接口（/i/{token}/json）。
+
+    已是 /json、或 /i/{token} 形态的链接会相应处理；无法识别的链接原样返回。
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith(("http://", "https://")):
+        if raw.rstrip("/").endswith("/json"):
+            return raw
+        m = INBOX_PAGE_RE.match(raw)
+        if m:
+            scheme, host, token = m.groups()
+            site = (cfg.get("site_url") or "").strip().rstrip("/")
+            base = site if site else f"{scheme}://{host}"
+            return f"{base}/i/{token}/json"
+        if re.search(r"/i/[^/?#]+/?$", raw):
+            return raw.rstrip("/") + "/json"
+        return raw
+    return build_fetch_url(raw, cfg)
+
+
 def with_page(url: str, page: int) -> str:
     """给取件 URL 追加分页参数（page 从 1 开始）。"""
     if page <= 1:
@@ -345,18 +371,22 @@ def match_inbox_account(
     return None
 
 
-async def fetch_account_mail(
-    account: dict[str, Any], cfg: dict[str, Any] | None = None
+async def fetch_inbox_mail(
+    email: str,
+    cfg: dict[str, Any] | None = None,
+    *,
+    account_id: int | None = None,
+    inbox_id: int | None = None,
 ) -> dict[str, Any]:
-    """拉取单个账号邮箱的邮件（通用预留实现）。
+    """拉取单个邮箱的邮件（通用预留实现，支持账号邮箱与独立邮箱）。
 
-    - 账号 email 是完整 URL → 直接 GET；
+    - email 是完整链接 → 规范化（/m/{token} → /i/{token}/json）后直接 GET；
     - 否则用 email.api_base 模板（支持 {email}）拼接；
     - 两者都无法构造时返回 not_configured 与提示。
     """
     cfg = cfg or load_settings()
-    email = (account.get("email") or "").strip()
-    url = build_fetch_url(email, cfg)
+    email = (email or "").strip()
+    url = normalize_fetch_url(email, cfg)
     if not url:
         return {
             "ok": False,
@@ -408,7 +438,8 @@ async def fetch_account_mail(
             or (verify_code if idx == 0 else "")
         )
         if db.add_email_message(
-            account_id=account.get("id"),
+            account_id=account_id,
+            inbox_id=inbox_id,
             email=msg["email"] or email,
             message_id=msg["message_id"],
             sender=msg["sender"],
@@ -426,3 +457,12 @@ async def fetch_account_mail(
         "verificationCode": verify_code,
         "email": email,
     }
+
+
+async def fetch_account_mail(
+    account: dict[str, Any], cfg: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """拉取账号邮箱的邮件（保留旧调用方式）。"""
+    return await fetch_inbox_mail(
+        account.get("email", ""), cfg, account_id=account.get("id")
+    )

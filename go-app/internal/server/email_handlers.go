@@ -74,14 +74,19 @@ func (s *Server) handleSaveEmailSettings(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleEmailMessages(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	var accountID *int
+	var accountID, inboxID *int
 	if raw := q.Get("accountId"); raw != "" {
 		if id, err := strconv.Atoi(raw); err == nil {
 			accountID = &id
 		}
 	}
+	if raw := q.Get("inboxId"); raw != "" {
+		if id, err := strconv.Atoi(raw); err == nil {
+			inboxID = &id
+		}
+	}
 	cfg := ops.LoadEmailConfig(emailConfigDir(s))
-	items, err := ops.ListEmailMessages(s.opsDB, accountID, q.Get("q"), intParam(q.Get("limit"), 100))
+	items, err := ops.ListEmailMessages(s.opsDB, accountID, q.Get("q"), intParam(q.Get("limit"), 100), inboxID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
@@ -137,7 +142,7 @@ func (s *Server) handleEmailImport(w http.ResponseWriter, r *http.Request) {
 		ok, err := ops.AddEmailMessage(
 			s.opsDB, accID, firstNonEmpty(email, byIDValue(byID, accID)),
 			strOf(m, "messageId", "id"), strOf(m, "sender"), strOf(m, "subject"),
-			body, strOf(m, "receivedAt"), code)
+			body, strOf(m, "receivedAt"), code, nil)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 			return
@@ -174,16 +179,9 @@ func (s *Server) handleEmailRefresh(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	results := []map[string]any{}
 	count := 0
-	for _, a := range accounts {
-		if accountID != nil && a.ID != *accountID {
-			continue
-		}
-		if a.Email == "" {
-			continue
-		}
-		res := ops.FetchAccountMail(client, a.Email, cfg)
-		entry := map[string]any{"id": a.ID, "username": a.Username}
-		addedAccount := 0
+
+	saveMessages := func(res map[string]any, emailFallback string, accID, inboxID *int) int {
+		added := 0
 		verifyCode := ""
 		if v, ok := res["verificationCode"].(string); ok {
 			verifyCode = v
@@ -197,27 +195,68 @@ func (s *Server) handleEmailRefresh(w http.ResponseWriter, r *http.Request) {
 					code = verifyCode
 				}
 				if _, err := ops.AddEmailMessage(
-					s.opsDB, &a.ID, firstNonEmpty(email, a.Email),
+					s.opsDB, accID, firstNonEmpty(email, emailFallback),
 					strOf(m, "message_id"), strOf(m, "sender"), strOf(m, "subject"),
-					body, strOf(m, "received_at"), code); err == nil {
-					addedAccount++
+					body, strOf(m, "received_at"), code, inboxID); err == nil {
+					added++
 				}
 			}
-			entry["fetched"] = len(msgs)
 		}
-		entry["added"] = addedAccount
-		if verifyCode != "" {
-			entry["verificationCode"] = verifyCode
+		return added
+	}
+
+	for _, a := range accounts {
+		if accountID != nil && a.ID != *accountID {
+			continue
+		}
+		if a.Email == "" {
+			continue
+		}
+		res := ops.FetchInboxMail(client, a.Email, cfg, nil)
+		acc := a.ID
+		added := saveMessages(res, a.Email, &acc, nil)
+		entry := map[string]any{"id": a.ID, "username": a.Username, "kind": "account", "added": added}
+		if v, ok := res["verificationCode"].(string); ok && v != "" {
+			entry["verificationCode"] = v
 		}
 		for _, k := range []string{"ok", "reason", "hint", "url"} {
 			if v, exists := res[k]; exists {
 				entry[k] = v
 			}
 		}
-		count += addedAccount
+		count += added
 		results = append(results, entry)
 	}
-	ops.Audit(s.opsDB, "email.refresh", nil, "", "刷新邮箱："+strconv.Itoa(len(results))+" 个账号")
+
+	// 独立邮箱（未匹配账号的导入条目）
+	if accountID == nil {
+		if inboxes, err := ops.ListInboxes(s.opsDB); err == nil {
+			for _, ib := range inboxes {
+				ibID := int(ib.ID)
+				res := ops.FetchInboxMail(client, ib.URL, cfg, &ibID)
+				fallback := firstNonEmpty(ib.Email, ib.URL)
+				added := saveMessages(res, fallback, nil, &ibID)
+				entry := map[string]any{"id": ib.ID, "email": fallback, "kind": "inbox", "added": added}
+				if v, ok := res["verificationCode"].(string); ok && v != "" {
+					entry["verificationCode"] = v
+				}
+				for _, k := range []string{"ok", "reason", "hint", "url"} {
+					if v, exists := res[k]; exists {
+						entry[k] = v
+					}
+				}
+				count += added
+				results = append(results, entry)
+			}
+		}
+	}
+	if len(results) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "reason": "no_account", "hint": "没有填写邮箱的账号或独立邮箱",
+		})
+		return
+	}
+	ops.Audit(s.opsDB, "email.refresh", nil, "", "刷新邮箱："+strconv.Itoa(len(results))+" 个")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "added": count, "results": results,
 	})
@@ -283,18 +322,78 @@ func (s *Server) handleEmailInboxesImport(w http.ResponseWriter, r *http.Request
 	}
 	updated := 0
 	for _, item := range in.Items {
-		id, _ := item["accountId"].(float64)
 		url := strOf(item, "url")
-		if int(id) == 0 || url == "" {
+		if url == "" {
 			continue
 		}
-		if err := s.cfg.SetEmail(int(id), url); err == nil {
+		if rawID, ok := item["accountId"].(float64); ok && int(rawID) != 0 {
+			if err := s.cfg.SetEmail(int(rawID), url); err == nil {
+				updated++
+			}
+			continue
+		}
+		// 未匹配账号：存为独立邮箱
+		if _, err := ops.AddInbox(s.opsDB, strOf(item, "email"), url); err == nil {
 			updated++
 		}
 	}
 	ops.Audit(s.opsDB, "email.inboxes.import", nil, "",
-		"导入邮箱清单：关联 "+strconv.Itoa(updated)+" 个账号")
+		"导入邮箱清单：关联/新增 "+strconv.Itoa(updated)+" 条")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updated})
+}
+
+// handleEmailInboxes 返回独立邮箱清单。
+func (s *Server) handleEmailInboxes(w http.ResponseWriter, r *http.Request) {
+	items, err := ops.ListInboxes(s.opsDB)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleEmailInboxAdd 新增独立邮箱。
+func (s *Server) handleEmailInboxAdd(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Email string `json:"email"`
+		URL   string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请求格式不正确"})
+		return
+	}
+	item, err := ops.AddInbox(s.opsDB, in.Email, in.URL)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	if item == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "url 不能为空或已存在"})
+		return
+	}
+	// 审计只记录邮箱名，不写取件链接（含 token）
+	ops.Audit(s.opsDB, "email.inboxes.add", nil, "", "新增独立邮箱："+firstNonEmpty(item.Email, "未命名"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+}
+
+// handleEmailInboxDelete 删除独立邮箱。
+func (s *Server) handleEmailInboxDelete(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "独立邮箱不存在"})
+		return
+	}
+	deleted, err := ops.DeleteInbox(s.opsDB, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "独立邮箱不存在"})
+		return
+	}
+	ops.Audit(s.opsDB, "email.inboxes.delete", nil, "", "删除独立邮箱 #"+strconv.Itoa(id))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func intParam(raw string, def int) int {

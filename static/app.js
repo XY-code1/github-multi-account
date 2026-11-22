@@ -110,7 +110,7 @@ const state = {
   version: null,
   webhooks: [],
   webhookTypes: [],
-  email: { settings: null, accounts: [], items: [], accountId: "", q: "" },
+  email: { settings: null, accounts: [], inboxes: [], items: [], filter: "", q: "" },
 };
 
 // ---------------- 路由 ----------------
@@ -971,13 +971,21 @@ async function loadAutomation() {
 async function loadEmail() {
   try {
     const q = state.email.q ? `&q=${encodeURIComponent(state.email.q)}` : "";
-    const acc = state.email.accountId ? `&accountId=${state.email.accountId}` : "";
-    const [settingsResp, messagesResp] = await Promise.all([
+    const filter = state.email.filter || "";
+    let msgQuery = `/api/email/messages?limit=200${q}`;
+    if (filter.startsWith("inbox:")) {
+      msgQuery += `&inboxId=${encodeURIComponent(filter.slice(6))}`;
+    } else if (filter) {
+      msgQuery += `&accountId=${encodeURIComponent(filter)}`;
+    }
+    const [settingsResp, messagesResp, inboxesResp] = await Promise.all([
       api("/api/email/settings"),
-      api(`/api/email/messages?limit=200${acc}${q}`),
+      api(msgQuery),
+      api("/api/email/inboxes"),
     ]);
     state.email.settings = settingsResp.settings || {};
     state.email.accounts = settingsResp.accounts || [];
+    state.email.inboxes = inboxesResp.items || [];
     state.email.items = messagesResp.items || [];
     renderEmailAccounts();
     renderEmailList();
@@ -989,12 +997,19 @@ async function loadEmail() {
 
 function renderEmailAccounts() {
   const sel = document.getElementById("emailAccount");
+  const cur = state.email.filter || "";
   const withEmail = (state.email.accounts || []).filter((a) => a.email);
-  sel.innerHTML = `<option value="">全部邮箱（${withEmail.length}）</option>` +
-    withEmail.map((a) =>
-      `<option value="${a.id}">${escapeHtml(a.label || a.username)} · ${escapeHtml(a.email)}</option>`
-    ).join("");
-  sel.value = state.email.accountId || "";
+  const inboxes = state.email.inboxes || [];
+  const opt = (value, label) =>
+    `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+  sel.innerHTML = `<option value="">全部邮箱（${withEmail.length + inboxes.length}）</option>` +
+    withEmail.map((a) => opt(a.id, `${a.label || a.username} · ${a.email}`)).join("") +
+    (inboxes.length
+      ? `<optgroup label="独立邮箱">${inboxes
+          .map((b) => opt(`inbox:${b.id}`, `${b.email || b.url}`))
+          .join("")}</optgroup>`
+      : "");
+  sel.value = cur;
 }
 
 function emailUnbound(n) {
@@ -1138,21 +1153,21 @@ async function parseEmailInboxes() {
     }
     const matched = rows.filter((r) => r.accountId).length;
     preview.innerHTML = `<table class="mail-table"><thead><tr>
-      <th></th><th>邮箱</th><th>取件链接</th><th>匹配账号</th></tr></thead><tbody>
+      <th></th><th>邮箱 / 标识</th><th>取件链接</th><th>账号匹配</th></tr></thead><tbody>
       ${rows.map((c, i) => `<tr class="${c.accountId ? "" : "row-invalid"}">
-        <td class="col-check"><input type="checkbox" data-inbox="${i}" ${c.accountId ? "checked" : ""}></td>
+        <td class="col-check"><input type="checkbox" data-inbox="${i}" checked></td>
         <td>${escapeHtml(c.email || "-")}</td>
         <td class="cell-sub">${escapeHtml(c.url || "-")}</td>
-        <td>${c.accountId ? escapeHtml(c.accountUsername) : '<span class="tag is-warning">未匹配</span>'}</td>
+        <td>${c.accountId ? escapeHtml(c.accountUsername) : '<span class="tag">作为独立邮箱</span>'}</td>
       </tr>`).join("")}</tbody></table>
-      <p class="page-desc">已匹配 ${matched} / ${rows.length} 条；未匹配的默认不勾选（可先在账号上填写同名用户名或邮箱）。</p>`;
+      <p class="page-desc">已匹配 ${matched} / ${rows.length} 条：匹配的会回填到账号「关联邮箱」，未匹配的导入为独立邮箱（不依赖账号）。</p>`;
     preview.querySelectorAll("[data-inbox]").forEach((cb) => {
       cb.addEventListener("change", () => {
         const any = preview.querySelectorAll("[data-inbox]:checked").length;
         document.getElementById("emailInboxDoImportBtn").disabled = !any;
       });
     });
-    document.getElementById("emailInboxDoImportBtn").disabled = !matched;
+    document.getElementById("emailInboxDoImportBtn").disabled = !rows.length;
   } catch (e) {
     preview.innerHTML = `<div class="empty-tab">解析失败：${escapeHtml(e.message)}</div>`;
   }
@@ -1163,7 +1178,7 @@ async function importEmailInboxes() {
   const idxs = Array.from(preview.querySelectorAll("[data-inbox]:checked"))
     .map((cb) => Number(cb.dataset.inbox));
   const items = idxs.map((i) => state.email.inboxCandidates[i]).filter(Boolean)
-    .map((c) => ({ accountId: c.accountId, url: c.url }));
+    .map((c) => ({ accountId: c.accountId || null, email: c.email, url: c.url }));
   if (!items.length) return;
   try {
     const res = await api("/api/email/inboxes/import", {
@@ -2032,7 +2047,7 @@ function bindEvents() {
   document.getElementById("emailSettingsSave").addEventListener("click", saveEmailSettings);
   document.getElementById("emailModal").addEventListener("click", (e) => { if (e.target.id === "emailModal") document.getElementById("emailModal").classList.add("hidden"); });
   document.getElementById("emailAccount").addEventListener("change", (e) => {
-    state.email.accountId = e.target.value;
+    state.email.filter = e.target.value;
     loadEmail();
   });
   document.getElementById("emailSearch").addEventListener("input", debounce(() => {

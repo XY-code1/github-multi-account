@@ -49,6 +49,29 @@ func TestEmailSettingsImportAndListFlow(t *testing.T) {
 	}
 }
 
+func TestEmailInboxImportUnmatchedBecomesInbox(t *testing.T) {
+	h, cfg, _ := newTestEnv(t)
+	if _, err := cfg.Add(config.Account{Label: "Alice", Username: "alice", Token: "t"}); err != nil {
+		t.Fatalf("建账号失败: %v", err)
+	}
+	w := do(h, http.MethodPost, "/api/email/inboxes/import",
+		`{"items":[
+			{"accountId":1,"url":"https://mail.123456.world/i/tok-a/json"},
+			{"email":"stranger@icloud.com","url":"https://mail.123456.world/i/tok-b/json"}
+		]}`, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"updated":2`) {
+		t.Fatalf("导入失败: %d %s", w.Code, w.Body.String())
+	}
+	list := do(h, http.MethodGet, "/api/email/inboxes", "", nil)
+	if !strings.Contains(list.Body.String(), `"email":"stranger@icloud.com"`) {
+		t.Fatalf("未匹配条目应存为独立邮箱: %s", list.Body.String())
+	}
+	accounts, _ := cfg.Accounts()
+	if accounts[0].Email != "https://mail.123456.world/i/tok-a/json" {
+		t.Fatalf("账号邮箱未回填: %+v", accounts[0])
+	}
+}
+
 func TestEmailRefreshDisabled(t *testing.T) {
 	h := newTestHandler(t)
 	w := do(h, http.MethodPost, "/api/email/refresh", `{}`, nil)

@@ -183,6 +183,22 @@ def test_email_api_flow():
         assert accounts["alice"]["email"].endswith("/i/tok-a/json")
         assert accounts["bob"]["email"].endswith("/i/tok-b/json")
 
+        # 未匹配账号的条目导入为独立邮箱
+        text2 = (
+            "alice https://mail.123456.world/i/tok-a\n"
+            "stranger@icloud.com https://mail.123456.world/i/tok-b"
+        )
+        parsed2 = client.post("/api/email/inboxes/parse", json={"text": text2}).json()
+        assert {c["email"] for c in parsed2["candidates"]} == {
+            "alice", "stranger@icloud.com",
+        }
+        resp2 = client.post(
+            "/api/email/inboxes/import", json={"items": parsed2["candidates"]}
+        ).json()
+        assert resp2["updated"] == 2
+        inboxes = client.get("/api/email/inboxes").json()["items"]
+        assert len(inboxes) == 1 and inboxes[0]["email"] == "stranger@icloud.com"
+
 
 def test_db_message_dedup_and_account_filter():
     db.add_email_message(account_id=1, email="a@b", message_id="z1", sender="s",
@@ -248,6 +264,40 @@ def test_parse_inbox_list_json_and_dedup():
     )
     assert len(dedup) == 2
     assert dedup[-1]["email"] == ""
+
+
+def test_normalize_fetch_url_page_link():
+    cfg = dict(email.DEFAULTS)
+    got = email.normalize_fetch_url(
+        "https://mail.123456.world/m/kRDlX23C21-abc", cfg
+    )
+    assert got == "https://inbox.123456.world/i/kRDlX23C21-abc/json"
+    assert email.normalize_fetch_url(
+        "https://inbox.123456.world/i/tok/json", cfg
+    ) == "https://inbox.123456.world/i/tok/json"
+    assert email.normalize_fetch_url(
+        "https://mail.123456.world/m/tok", {"site_url": ""}
+    ) == "https://mail.123456.world/i/tok/json"
+
+
+def test_normalize_fetch_url_token_only():
+    assert email.normalize_fetch_url(
+        "tok", email.DEFAULTS
+    ) == "https://inbox.123456.world/i/tok/json"
+
+
+def test_inbox_crud():
+    assert db.add_inbox("a@b.com", "https://inbox.123456.world/i/t1/json") is not None
+    assert db.add_inbox("a@b.com", "https://inbox.123456.world/i/t1/json") is None
+    assert len(db.list_inboxes()) == 1
+    inbox_id = db.list_inboxes()[0]["id"]
+    db.add_email_message(account_id=None, inbox_id=inbox_id, email="a@b.com",
+                         message_id="i1", sender="s", subject="t", body="b",
+                         received_at="")
+    assert len(db.list_email_messages(inbox_id=inbox_id)) == 1
+    assert len(db.list_email_messages(account_id=None)) == 1
+    assert db.delete_inbox(inbox_id) is True
+    assert db.delete_inbox(inbox_id) is False
 
 
 def test_match_inbox_account():

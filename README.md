@@ -237,12 +237,12 @@ MCP 调用有**令牌桶限流**：`sync_all` / `sync_account` / `create_pr` 属
 
 - 账号可在「添加账号 / 关联邮箱」填写**邮箱地址或完整取件链接**，列表与详情会展示，邮箱页可按账号筛选。
 - 邮件缓存在本地 SQLite（`email_messages` 表），重复 `message_id` 自动跳过；支持手动「导入 JSON」与「刷新邮件」。
-- **导入邮箱清单**：邮箱页点「导入邮箱」，粘贴或上传「邮笺」导出的文本（每行 `邮箱 链接`，或邮箱与链接各占一行；也支持 JSON），系统解析后预览并**按邮箱地址 / 邮箱名 / 用户名匹配现有账号**，勾选确认后只回填账号的「关联邮箱」字段（不动 Token 等）。
+- **导入邮箱清单**：邮箱页点「导入邮箱」，粘贴或上传「邮笺」导出的文本（每行 `邮箱 链接`，或邮箱与链接各占一行；也支持 JSON），系统解析后预览并**按邮箱地址 / 邮箱名 / 用户名匹配现有账号**，勾选确认后只回填账号的「关联邮箱」字段（不动 Token 等）。**匹配不到的条目会导入为「独立邮箱」**（不依赖账号，可正常刷新与查看邮件）。
 - 验证码提取：默认在「验证码 / verification / code」等关键词附近找 4-8 位数字或含数字的 6-8 位混合码，可用 `email.code_pattern` 自定义正则。
 
 已与「邮笺」取件接口打通（`GET https://inbox.123456.world/i/{token}/json`，无需额外请求头）：
 
-- 账号「关联邮箱」填 **token**（推荐，如 `kRDIX23C21-gAc8HqopiuZrkY-diBDzrNqTClRypYvw`）或**完整取件链接**；填 token 时按 `email.api_base` 模板拼成 `/i/{token}/json`。
+- 账号「关联邮箱」填 **token**（推荐，如 `kRDIX23C21-gAc8HqopiuZrkY-diBDzrNqTClRypYvw`）或**完整取件链接**；填 token 时按 `email.api_base` 模板拼成 `/i/{token}/json`。邮笺导出的网页链接 `https://mail.123456.world/m/{token}` 会被**自动规范化**为 `{site_url}/i/{token}/json`（`site_url` 默认 `https://inbox.123456.world`，可在设置里改）。
 - 响应结构：`{ok, email, verificationCode, latestMessage, messages[], total, page, pageSize, hasMore, expiresAt}`；顶层 `verificationCode` 会作为「当前验证码」展示，列表页顶部与高亮卡片都会显示。
 - 自动翻页：按 `hasMore` 依次请求 `?page=2...`，最多 `email.max_pages` 页（默认 5）。
 - 邮件字段按 `id/from/subject/body/date` 解析（兼容 `sender/title/text/html/created_at` 等别名），重复 `message_id` 自动跳过。

@@ -873,9 +873,14 @@ async def save_email_settings(payload: EmailSettingsIn) -> dict[str, Any]:
 
 
 @app.get("/api/email/messages")
-async def email_messages(accountId: int | None = None, q: str = "", limit: int = 100) -> dict[str, Any]:
-    """本地缓存的邮件列表（可按账号 / 关键字筛选，正文提取验证码仅用于展示）。"""
-    items = db.list_email_messages(account_id=accountId, q=q, limit=limit)
+async def email_messages(
+    accountId: int | None = None, inboxId: int | None = None,
+    q: str = "", limit: int = 100,
+) -> dict[str, Any]:
+    """本地缓存的邮件列表（可按账号 / 独立邮箱 / 关键字筛选，正文提取验证码仅用于展示）。"""
+    items = db.list_email_messages(
+        account_id=accountId, q=q, limit=limit, inbox_id=inboxId
+    )
     for it in items:
         it["code"] = _email_code(it.get("body") or "")
     return {"items": items, "total": len(items)}
@@ -921,13 +926,21 @@ async def email_refresh(accountId: int | None = None) -> dict[str, Any]:
     accounts = config.load_accounts()
     targets = [a for a in accounts if accountId is None or a["id"] == accountId]
     targets = [a for a in targets if (a.get("email") or "").strip()]
-    if not targets:
-        return {"ok": False, "reason": "no_account", "hint": "没有填写邮箱的账号"}
+    inboxes = [] if accountId else db.list_inboxes()
+    if not targets and not inboxes:
+        return {"ok": False, "reason": "no_account", "hint": "没有填写邮箱的账号或独立邮箱"}
     results = []
     for acc in targets:
-        results.append({"id": acc["id"], "username": acc["username"],
-                        **await email.fetch_account_mail(acc, cfg)})
-    db.audit("email.refresh", detail=f"刷新邮箱：{len(results)} 个账号")
+        results.append({
+            "id": acc["id"], "username": acc["username"], "kind": "account",
+            **await email.fetch_inbox_mail(acc["email"], cfg, account_id=acc["id"]),
+        })
+    for ib in inboxes:
+        results.append({
+            "id": ib["id"], "email": ib.get("email") or ib.get("url", ""), "kind": "inbox",
+            **await email.fetch_inbox_mail(ib["url"], cfg, inbox_id=ib["id"]),
+        })
+    db.audit("email.refresh", detail=f"刷新邮箱：{len(results)} 个")
     return {"ok": True, "results": results}
 
 
@@ -971,19 +984,51 @@ async def email_inboxes_parse(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/email/inboxes/import")
 async def email_inboxes_import(payload: EmailInboxImportIn) -> dict[str, Any]:
-    """把邮箱清单按账号回填（只更新账号的关联邮箱字段）。"""
+    """导入邮箱清单：匹配到账号的回填账号 email，未匹配的存为独立邮箱。"""
     updated = 0
     for item in payload.items:
         if not isinstance(item, dict):
             continue
-        acc_id = item.get("accountId")
         url = str(item.get("url") or "").strip()
-        if not acc_id or not url:
+        if not url:
             continue
-        if config.set_account_email(int(acc_id), url) is not None:
+        acc_id = item.get("accountId")
+        if acc_id:
+            if config.set_account_email(int(acc_id), url) is not None:
+                updated += 1
+        elif db.add_inbox(str(item.get("email") or "").strip(), url):
             updated += 1
-    db.audit("email.inboxes.import", detail=f"导入邮箱清单：关联 {updated} 个账号")
+    db.audit("email.inboxes.import", detail=f"导入邮箱清单：关联/新增 {updated} 条")
     return {"ok": True, "updated": updated}
+
+
+class EmailInboxIn(BaseModel):
+    email: str = ""
+    url: str = ""
+
+
+@app.get("/api/email/inboxes")
+async def email_inboxes() -> dict[str, Any]:
+    """独立邮箱清单（不依赖账号）。"""
+    return {"items": db.list_inboxes()}
+
+
+@app.post("/api/email/inboxes")
+async def email_inbox_add(payload: EmailInboxIn) -> dict[str, Any]:
+    item = db.add_inbox(payload.email, payload.url)
+    if item is None:
+        raise HTTPException(status_code=400, detail="url 不能为空或已存在")
+    # 审计只记录邮箱名，不写取件链接（含 token）
+    db.audit("email.inboxes.add", detail=f"新增独立邮箱：{item['email'] or '未命名'}")
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/email/inboxes/{inbox_id}")
+async def email_inbox_delete(inbox_id: int) -> dict[str, Any]:
+    if not db.delete_inbox(inbox_id):
+        raise HTTPException(status_code=404, detail="独立邮箱不存在")
+    db.audit("email.inboxes.delete", detail=f"删除独立邮箱 #{inbox_id}")
+    return {"ok": True}
 
 
 # ------------------------------ 前端页面 ------------------------------

@@ -91,6 +91,7 @@ func SaveEmailConfig(dir string, cfg EmailConfig) error {
 type EmailMessage struct {
 	ID         int64 `json:"id"`
 	AccountID  any   `json:"account_id"`
+	InboxID    any   `json:"inbox_id"`
 	Email      string `json:"email"`
 	MessageID  string `json:"message_id"`
 	Sender     string `json:"sender"`
@@ -101,33 +102,34 @@ type EmailMessage struct {
 	CreatedAt  string `json:"created_at"`
 }
 
-// AddEmailMessage 保存一封邮件；同账号同 message_id 视为重复。
+// AddEmailMessage 保存一封邮件；同账号/邮箱同 message_id 视为重复。
 func AddEmailMessage(
 	db *sql.DB, accountID *int, email, messageID, sender, subject, body, receivedAt, code string,
+	inboxID *int,
 ) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if messageID != "" {
 		var exists int
 		row := db.QueryRow(
-			"SELECT 1 FROM email_messages WHERE account_id IS ? AND message_id=? LIMIT 1",
-			accountID, messageID)
+			"SELECT 1 FROM email_messages WHERE (account_id IS ? OR inbox_id IS ?) AND message_id=? LIMIT 1",
+			accountID, inboxID, messageID)
 		if err := row.Scan(&exists); err == nil {
 			return false, nil
 		}
 	}
 	_, err := db.Exec(
 		"INSERT INTO email_messages"+
-			" (account_id, email, message_id, sender, subject, body, code, received_at, created_at)"+
-			" VALUES (?,?,?,?,?,?,?,?,?)",
-		accountID, email, messageID, sender, subject, body, code, receivedAt, now)
+			" (account_id, inbox_id, email, message_id, sender, subject, body, code, received_at, created_at)"+
+			" VALUES (?,?,?,?,?,?,?,?,?,?)",
+		accountID, inboxID, email, messageID, sender, subject, body, code, receivedAt, now)
 	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// ListEmailMessages 列出本地缓存邮件（可按账号 / 关键字筛选）。
-func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int) ([]EmailMessage, error) {
+// ListEmailMessages 列出本地缓存邮件（可按账号 / 独立邮箱 / 关键字筛选）。
+func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int, inboxID *int) ([]EmailMessage, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -140,12 +142,16 @@ func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int) ([]Email
 		cond = append(cond, "account_id=?")
 		args = append(args, *accountID)
 	}
+	if inboxID != nil {
+		cond = append(cond, "inbox_id=?")
+		args = append(args, *inboxID)
+	}
 	if q != "" {
 		cond = append(cond, "(subject LIKE ? OR body LIKE ? OR sender LIKE ? OR email LIKE ?)")
 		like := "%" + q + "%"
 		args = append(args, like, like, like, like)
 	}
-	query := "SELECT id, account_id, email, message_id, sender, subject, body, code, received_at, created_at FROM email_messages"
+	query := "SELECT id, account_id, inbox_id, email, message_id, sender, subject, body, code, received_at, created_at FROM email_messages"
 	if len(cond) > 0 {
 		query += " WHERE " + strings.Join(cond, " AND ")
 	}
@@ -160,13 +166,16 @@ func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int) ([]Email
 	out := []EmailMessage{}
 	for rows.Next() {
 		var m EmailMessage
-		var accountID sql.NullInt64
-		if err := rows.Scan(&m.ID, &accountID, &m.Email, &m.MessageID, &m.Sender,
+		var accountID, inboxID sql.NullInt64
+		if err := rows.Scan(&m.ID, &accountID, &inboxID, &m.Email, &m.MessageID, &m.Sender,
 			&m.Subject, &m.Body, &m.Code, &m.ReceivedAt, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if accountID.Valid {
 			m.AccountID = accountID.Int64
+		}
+		if inboxID.Valid {
+			m.InboxID = inboxID.Int64
 		}
 		out = append(out, m)
 	}
@@ -562,6 +571,92 @@ func withPage(u string, page int) string {
 	return u + sep + "page=" + strconv.Itoa(page)
 }
 
+var inboxPageRe = regexp.MustCompile(`^(https?)://([^/]+)/m/([^/?#]+)/?$`)
+
+// NormalizeFetchURL 把邮笺的网页链接（/m/{token}）规范化为取件 JSON 接口（/i/{token}/json）。
+func NormalizeFetchURL(u string, cfg EmailConfig) string {
+	raw := strings.TrimSpace(u)
+	if raw == "" {
+		return ""
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		if strings.HasSuffix(strings.TrimRight(raw, "/"), "/json") {
+			return raw
+		}
+		if m := inboxPageRe.FindStringSubmatch(raw); m != nil {
+			site := strings.TrimRight(cfg.SiteURL, "/")
+			base := site
+			if base == "" {
+				base = m[1] + "://" + m[2]
+			}
+			return base + "/i/" + m[3] + "/json"
+		}
+		if regexp.MustCompile(`/i/[^/?#]+/?$`).MatchString(raw) {
+			return strings.TrimRight(raw, "/") + "/json"
+		}
+		return raw
+	}
+	return BuildFetchURL(raw, cfg)
+}
+
+// Inbox 是一条独立邮箱（不依赖账号）。
+type Inbox struct {
+	ID        int64  `json:"id"`
+	Email     string `json:"email"`
+	URL       string `json:"url"`
+	CreatedAt string `json:"created_at"`
+}
+
+// AddInbox 新增独立邮箱（同 url 去重）。
+func AddInbox(db *sql.DB, emailAddr, url string) (*Inbox, error) {
+	emailAddr = strings.TrimSpace(emailAddr)
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return nil, nil
+	}
+	var exists int
+	if err := db.QueryRow("SELECT 1 FROM email_inboxes WHERE url=? LIMIT 1", url).Scan(&exists); err == nil {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := db.Exec("INSERT INTO email_inboxes (email, url, created_at) VALUES (?,?,?)",
+		emailAddr, url, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return &Inbox{ID: id, Email: emailAddr, URL: url, CreatedAt: now}, nil
+}
+
+// ListInboxes 返回独立邮箱清单。
+func ListInboxes(db *sql.DB) ([]Inbox, error) {
+	rows, err := db.Query("SELECT id, email, url, created_at FROM email_inboxes ORDER BY id DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Inbox{}
+	for rows.Next() {
+		var in Inbox
+		if err := rows.Scan(&in.ID, &in.Email, &in.URL, &in.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, in)
+	}
+	return out, rows.Err()
+}
+
+// DeleteInbox 删除独立邮箱。
+func DeleteInbox(db *sql.DB, id int) (bool, error) {
+	res, err := db.Exec("DELETE FROM email_inboxes WHERE id=?", id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 func firstString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
 		v, ok := m[k]
@@ -590,9 +685,10 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
-// FetchAccountMail 拉取单个账号邮箱的邮件（通用预留实现）。
-func FetchAccountMail(client *http.Client, accountEmail string, cfg EmailConfig) map[string]any {
-	url := BuildFetchURL(accountEmail, cfg)
+// FetchInboxMail 拉取单个邮箱的邮件（支持账号邮箱与独立邮箱）。
+func FetchInboxMail(client *http.Client, emailAddr string, cfg EmailConfig, inboxID *int) map[string]any {
+	emailAddr = strings.TrimSpace(emailAddr)
+	url := NormalizeFetchURL(emailAddr, cfg)
 	if url == "" {
 		return map[string]any{
 			"ok":     false,
@@ -646,7 +742,7 @@ func FetchAccountMail(client *http.Client, accountEmail string, cfg EmailConfig)
 		} else {
 			payload = string(body)
 		}
-		batch, code := ParsePayload(payload, accountEmail)
+		batch, code := ParsePayload(payload, emailAddr)
 		if verifyCode == "" {
 			verifyCode = code
 		}
@@ -658,6 +754,12 @@ func FetchAccountMail(client *http.Client, accountEmail string, cfg EmailConfig)
 	}
 	return map[string]any{
 		"ok": true, "url": url, "fetched": len(all),
-		"messages": all, "verificationCode": verifyCode, "account_email": accountEmail,
+		"messages": all, "verificationCode": verifyCode,
+		"email": emailAddr, "inboxId": inboxID,
 	}
+}
+
+// FetchAccountMail 拉取账号邮箱的邮件（保留旧调用方式）。
+func FetchAccountMail(client *http.Client, accountEmail string, cfg EmailConfig) map[string]any {
+	return FetchInboxMail(client, accountEmail, cfg, nil)
 }

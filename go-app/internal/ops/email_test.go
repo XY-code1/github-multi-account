@@ -150,37 +150,84 @@ func TestEmailMessageCRUD(t *testing.T) {
 	db := newEmailTestDB(t)
 	id1, id2 := 1, 2
 
-	if ok, err := AddEmailMessage(db, &id1, "a@b", "z1", "s", "t", "b", "", ""); !ok || err != nil {
+	if ok, err := AddEmailMessage(db, &id1, "a@b", "z1", "s", "t", "b", "", "", nil); !ok || err != nil {
 		t.Fatalf("首次写入应成功: ok=%v err=%v", ok, err)
 	}
-	if ok, _ := AddEmailMessage(db, &id1, "a@b", "z1", "s", "t", "b", "", ""); ok {
+	if ok, _ := AddEmailMessage(db, &id1, "a@b", "z1", "s", "t", "b", "", "", nil); ok {
 		t.Fatal("重复 message_id 应被跳过")
 	}
-	if _, err := AddEmailMessage(db, &id2, "c@d", "z2", "s", "t2", "b2", "", ""); err != nil {
+	if _, err := AddEmailMessage(db, &id2, "c@d", "z2", "s", "t2", "b2", "", "", nil); err != nil {
 		t.Fatalf("写入第二个账号失败: %v", err)
 	}
 
-	items, err := ListEmailMessages(db, &id1, "", 100)
+	items, err := ListEmailMessages(db, &id1, "", 100, nil)
 	if err != nil || len(items) != 1 {
 		t.Fatalf("按账号筛选失败: %v %+v", err, items)
 	}
 	if items[0].AccountID != int64(1) {
 		t.Fatalf("account_id 未正确返回: %+v", items[0].AccountID)
 	}
-	all, _ := ListEmailMessages(db, nil, "", 100)
+	all, _ := ListEmailMessages(db, nil, "", 100, nil)
 	if len(all) != 2 {
 		t.Fatalf("应有 2 封: %d", len(all))
 	}
-	matched, _ := ListEmailMessages(db, nil, "t2", 100)
+	matched, _ := ListEmailMessages(db, nil, "t2", 100, nil)
 	if len(matched) != 1 {
 		t.Fatalf("关键字筛选失败: %d", len(matched))
 	}
 	if n, _ := DeleteEmailMessages(db, &id1, nil); n != 1 {
 		t.Fatalf("删除条数应为 1: %d", n)
 	}
-	rest, _ := ListEmailMessages(db, nil, "", 100)
+	rest, _ := ListEmailMessages(db, nil, "", 100, nil)
 	if len(rest) != 1 {
 		t.Fatalf("删除后应剩 1 封: %d", len(rest))
+	}
+}
+
+func TestNormalizeFetchURL(t *testing.T) {
+	cfg := DefaultEmailConfig()
+	if got := NormalizeFetchURL("https://mail.123456.world/m/tok", cfg); got != "https://inbox.123456.world/i/tok/json" {
+		t.Fatalf("/m/{token} 应规范化为 /i/{token}/json: %q", got)
+	}
+	if got := NormalizeFetchURL("https://inbox.123456.world/i/tok/json", cfg); got != "https://inbox.123456.world/i/tok/json" {
+		t.Fatalf("已是 json 应原样返回: %q", got)
+	}
+	if got := NormalizeFetchURL("https://mail.123456.world/m/tok", EmailConfig{SiteURL: ""}); got != "https://mail.123456.world/i/tok/json" {
+		t.Fatalf("无 site_url 时应保持同 host: %q", got)
+	}
+	if got := NormalizeFetchURL("tok", cfg); got != "https://inbox.123456.world/i/tok/json" {
+		t.Fatalf("token 应按模板拼接: %q", got)
+	}
+}
+
+func TestInboxCRUD(t *testing.T) {
+	db := newEmailTestDB(t)
+	first, err := AddInbox(db, "a@b.com", "https://inbox.123456.world/i/t1/json")
+	if err != nil || first == nil {
+		t.Fatalf("新增独立邮箱失败: %v %+v", err, first)
+	}
+	if _, err := AddInbox(db, "a@b.com", "https://inbox.123456.world/i/t1/json"); err != nil {
+		t.Fatalf("重复 url 应被忽略: %v", err)
+	}
+	list, _ := ListInboxes(db)
+	if len(list) != 1 {
+		t.Fatalf("应有 1 个独立邮箱: %d", len(list))
+	}
+	id := int(first.ID)
+	if _, err := AddEmailMessage(db, nil, "a@b.com", "i1", "s", "t", "b", "", "", &id); err != nil {
+		t.Fatalf("写入独立邮箱邮件失败: %v", err)
+	}
+	msgs, _ := ListEmailMessages(db, nil, "", 100, &id)
+	if len(msgs) != 1 || msgs[0].InboxID != first.ID {
+		t.Fatalf("按 inbox_id 筛选失败: %+v", msgs)
+	}
+	ok, _ := DeleteInbox(db, id)
+	if !ok {
+		t.Fatal("删除应成功")
+	}
+	rest, _ := ListInboxes(db)
+	if len(rest) != 0 {
+		t.Fatalf("删除后应为空: %d", len(rest))
 	}
 }
 

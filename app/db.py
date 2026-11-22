@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS webhook_log (
 CREATE TABLE IF NOT EXISTS email_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
+    inbox_id INTEGER,
     email TEXT,
     message_id TEXT,
     sender TEXT,
@@ -156,6 +157,14 @@ CREATE TABLE IF NOT EXISTS email_messages (
     body TEXT,
     code TEXT,
     received_at TEXT,
+    created_at TEXT
+);
+
+-- 邮箱面板：独立邮箱清单（不依赖账号，如邮笺导出的取件链接）
+CREATE TABLE IF NOT EXISTS email_inboxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT,
+    url TEXT,
     created_at TEXT
 );
 """
@@ -181,6 +190,10 @@ def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _lock, _connect() as conn:
         conn.executescript(SCHEMA)
+        # 轻量迁移：旧库补列（CREATE IF NOT EXISTS 不会改已有表结构）
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(email_messages)")}
+        if "inbox_id" not in cols:
+            conn.execute("ALTER TABLE email_messages ADD COLUMN inbox_id INTEGER")
 
 
 # ------------------------------ 邮箱面板 ------------------------------
@@ -195,25 +208,28 @@ def add_email_message(
     body: str,
     received_at: str = "",
     code: str | None = None,
+    inbox_id: int | None = None,
 ) -> bool:
-    """保存一封邮件；同账号同 message_id 视为重复，返回是否新增。"""
+    """保存一封邮件；同账号/邮箱同 message_id 视为重复，返回是否新增。"""
     if not DB_FILE.exists():
         init_db()
     now = datetime.now(timezone.utc).isoformat()
     with _lock, _connect() as conn:
         if message_id:
             row = conn.execute(
-                "SELECT 1 FROM email_messages WHERE account_id IS ? AND message_id=?",
-                (account_id, message_id),
+                "SELECT 1 FROM email_messages"
+                " WHERE (account_id IS ? OR inbox_id IS ?) AND message_id=?",
+                (account_id, inbox_id, message_id),
             ).fetchone()
             if row:
                 return False
         conn.execute(
             "INSERT INTO email_messages"
-            " (account_id, email, message_id, sender, subject, body, code, received_at, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
+            " (account_id, inbox_id, email, message_id, sender, subject, body, code, received_at, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 account_id,
+                inbox_id,
                 email or "",
                 message_id or "",
                 sender or "",
@@ -228,16 +244,19 @@ def add_email_message(
 
 
 def list_email_messages(
-    account_id: int | None = None, q: str = "", limit: int = 100
+    account_id: int | None = None,
+    q: str = "",
+    limit: int = 100,
+    inbox_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """列出本地缓存邮件（可按账号 / 关键字筛选）。"""
+    """列出本地缓存邮件（可按账号 / 独立邮箱 / 关键字筛选）。"""
     if not DB_FILE.exists():
         return []
     limit = max(1, min(int(limit or 100), 500))
     with _lock, _connect() as conn:
         conn.row_factory = sqlite3.Row
         sql = (
-            "SELECT id, account_id, email, message_id, sender, subject, body, code,"
+            "SELECT id, account_id, inbox_id, email, message_id, sender, subject, body, code,"
             " received_at, created_at FROM email_messages"
         )
         cond: list[str] = []
@@ -245,6 +264,9 @@ def list_email_messages(
         if account_id:
             cond.append("account_id=?")
             params.append(account_id)
+        if inbox_id:
+            cond.append("inbox_id=?")
+            params.append(inbox_id)
         if q:
             cond.append("(subject LIKE ? OR body LIKE ? OR sender LIKE ? OR email LIKE ?)")
             like = f"%{q}%"
@@ -278,6 +300,47 @@ def delete_email_messages(
             f"DELETE FROM email_messages WHERE {' AND '.join(cond)}", params
         )
     return cur.rowcount or 0
+
+
+# ------------------------------ 独立邮箱清单 ------------------------------
+
+def add_inbox(email: str, url: str) -> dict[str, Any] | None:
+    """新增独立邮箱（同 url 去重），返回记录。"""
+    if not DB_FILE.exists():
+        init_db()
+    email = (email or "").strip()
+    url = (url or "").strip()
+    if not url:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT id FROM email_inboxes WHERE url=?", (url,)).fetchone()
+        if row:
+            return None
+        cur = conn.execute(
+            "INSERT INTO email_inboxes (email, url, created_at) VALUES (?,?,?)",
+            (email, url, now),
+        )
+        return {"id": cur.lastrowid, "email": email, "url": url, "created_at": now}
+
+
+def list_inboxes() -> list[dict[str, Any]]:
+    if not DB_FILE.exists():
+        return []
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, email, url, created_at FROM email_inboxes ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_inbox(inbox_id: int) -> bool:
+    if not DB_FILE.exists():
+        return False
+    with _lock, _connect() as conn:
+        cur = conn.execute("DELETE FROM email_inboxes WHERE id=?", (inbox_id,))
+    return (cur.rowcount or 0) > 0
 
 
 # ------------------------------ 审计日志 ------------------------------
