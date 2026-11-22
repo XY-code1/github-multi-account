@@ -144,6 +144,20 @@ CREATE TABLE IF NOT EXISTS webhook_log (
     ok INTEGER DEFAULT 0,
     detail TEXT
 );
+
+-- 邮箱面板：本地缓存的邮件（仅用于展示，不参与任何自动填充）
+CREATE TABLE IF NOT EXISTS email_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER,
+    email TEXT,
+    message_id TEXT,
+    sender TEXT,
+    subject TEXT,
+    body TEXT,
+    code TEXT,
+    received_at TEXT,
+    created_at TEXT
+);
 """
 
 ACCOUNT_TYPES = ("personal", "bot", "org")
@@ -167,6 +181,103 @@ def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _lock, _connect() as conn:
         conn.executescript(SCHEMA)
+
+
+# ------------------------------ 邮箱面板 ------------------------------
+
+def add_email_message(
+    *,
+    account_id: int | None,
+    email: str,
+    message_id: str,
+    sender: str,
+    subject: str,
+    body: str,
+    received_at: str = "",
+    code: str | None = None,
+) -> bool:
+    """保存一封邮件；同账号同 message_id 视为重复，返回是否新增。"""
+    if not DB_FILE.exists():
+        init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        if message_id:
+            row = conn.execute(
+                "SELECT 1 FROM email_messages WHERE account_id IS ? AND message_id=?",
+                (account_id, message_id),
+            ).fetchone()
+            if row:
+                return False
+        conn.execute(
+            "INSERT INTO email_messages"
+            " (account_id, email, message_id, sender, subject, body, code, received_at, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                account_id,
+                email or "",
+                message_id or "",
+                sender or "",
+                subject or "",
+                body or "",
+                code,
+                received_at or "",
+                now,
+            ),
+        )
+    return True
+
+
+def list_email_messages(
+    account_id: int | None = None, q: str = "", limit: int = 100
+) -> list[dict[str, Any]]:
+    """列出本地缓存邮件（可按账号 / 关键字筛选）。"""
+    if not DB_FILE.exists():
+        return []
+    limit = max(1, min(int(limit or 100), 500))
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        sql = (
+            "SELECT id, account_id, email, message_id, sender, subject, body, code,"
+            " received_at, created_at FROM email_messages"
+        )
+        cond: list[str] = []
+        params: list[Any] = []
+        if account_id:
+            cond.append("account_id=?")
+            params.append(account_id)
+        if q:
+            cond.append("(subject LIKE ? OR body LIKE ? OR sender LIKE ? OR email LIKE ?)")
+            like = f"%{q}%"
+            params += [like, like, like, like]
+        if cond:
+            sql += " WHERE " + " AND ".join(cond)
+        sql += " ORDER BY datetime(received_at) DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_email_messages(
+    account_id: int | None = None, ids: list[int] | None = None
+) -> int:
+    """删除邮件（按账号或指定 ID），返回删除条数。"""
+    if not DB_FILE.exists():
+        return 0
+    cond: list[str] = []
+    params: list[Any] = []
+    if account_id:
+        cond.append("account_id=?")
+        params.append(account_id)
+    if ids:
+        cond.append(f"id IN ({','.join('?' * len(ids))})")
+        params += list(ids)
+    if not cond:
+        return 0
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            f"DELETE FROM email_messages WHERE {' AND '.join(cond)}", params
+        )
+    return cur.rowcount or 0
 
 
 # ------------------------------ 审计日志 ------------------------------

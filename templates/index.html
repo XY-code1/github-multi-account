@@ -79,6 +79,7 @@
         <a class="nav-item" data-page="todos"><span class="nav-icon">✓</span>统一待办<span id="todoBadge" class="count-badge hidden">0</span></a>
         <a class="nav-item" data-page="automation"><span class="nav-icon">⚙</span>自动化任务</a>
         <a class="nav-item" data-page="graph"><span class="nav-icon">◈</span>关系图谱<span id="graphBadge" class="count-badge hidden">0</span></a>
+        <a class="nav-item" data-page="email"><span class="nav-icon">✉</span>邮箱<span id="emailBadge" class="count-badge hidden">0</span></a>
       </nav>
     </aside>
 
@@ -291,6 +292,27 @@
         </div>
       </section>
 
+      <!-- ========== 邮箱 ========== -->
+      <section id="page-email" class="page">
+        <div class="page-head">
+          <h2>邮箱</h2>
+          <p class="page-desc" id="emailDesc">查看账号关联邮箱的通知、安全邮件与验证码（仅展示，不会自动填充到任何网站）</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>邮件</h3>
+            <div class="chip-row">
+              <select id="emailAccount" class="select-sm"><option value="">全部邮箱</option></select>
+              <input id="emailSearch" class="input-sm" type="text" placeholder="搜索主题 / 正文 / 发件人">
+              <button id="emailRefreshBtn" class="btn btn-sm">刷新邮件</button>
+              <button id="emailImportBtn" class="btn btn-sm">导入 JSON</button>
+              <button id="emailSettingsBtn" class="btn btn-sm">邮箱设置</button>
+            </div>
+          </div>
+          <div id="emailList"></div>
+        </div>
+      </section>
+
       <!-- ========== 单账号详情 ========== -->
       <section id="page-detail" class="page">
         <div class="detail-head">
@@ -333,6 +355,7 @@
       </label>
       <label class="field"><span>标签（逗号分隔）</span><input id="fTags" type="text" placeholder="例如：核心, 自动化"></label>
       <label class="field"><span>备注（可选）</span><input id="fNote" type="text"></label>
+      <label class="field"><span>关联邮箱（可选）</span><input id="fEmail" type="text" placeholder="邮箱地址或取件链接，用于「邮箱」面板筛选"></label>
       <label class="field"><span>Personal Access Token</span><input id="fToken" type="password" autocomplete="off"></label>
       <div id="testResult" class="test-result"></div>
       <div class="import-docx">
@@ -393,6 +416,27 @@
         <button id="notifyTestBtn" class="btn">发送测试通知</button>
         <span class="spacer"></span>
         <button id="notifyCloseBtn" class="btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：邮箱设置 -->
+  <div id="emailModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>邮箱设置</h3>
+      <p class="modal-hint">用于「邮箱」面板（如「邮笺」的公开取件链接）。账号需填写「关联邮箱」字段：可直接填写完整取件链接，或填写邮箱地址并在这里配置取件接口模板。</p>
+      <label class="field"><span>启用邮箱面板</span><input id="emailEnabled" type="checkbox"></label>
+      <label class="field"><span>邮箱站地址</span><input id="emailSiteUrl" type="text" placeholder="https://inbox.123456.world"></label>
+      <label class="field"><span>取件接口模板（可选，支持 {email}）</span><input id="emailApiBase" type="text" placeholder="留空则使用账号 email 字段中的完整 URL"></label>
+      <label class="field"><span>鉴权令牌（可选，Bearer）</span><input id="emailToken" type="password" autocomplete="off"></label>
+      <label class="field"><span>自动刷新间隔（秒，0 = 不自动）</span><input id="emailInterval" type="number" min="0" step="60"></label>
+      <label class="field"><span>自定义验证码正则（可选）</span><input id="emailCodePattern" type="text" placeholder="留空使用内置规则"></label>
+      <label class="field"><span>优先在「验证码 / verification / code」附近提取</span><input id="emailContext" type="checkbox"></label>
+      <div id="emailSettingsResult" class="test-result"></div>
+      <div class="modal-actions">
+        <span class="spacer"></span>
+        <button id="emailSettingsClose" class="btn">关闭</button>
+        <button id="emailSettingsSave" class="btn btn-primary">保存</button>
       </div>
     </div>
   </div>

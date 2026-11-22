@@ -95,6 +95,7 @@ func newTestEnv(t *testing.T) (http.Handler, *config.Store, *store.Store) {
 		t.Fatalf("初始化运维中心失败: %v", err)
 	}
 	srv := New(cfg, svc, st, assets)
+	srv.SetBaseDir(t.TempDir())
 	srv.SetOpsDB(st.DB())
 	srv.SetEngine(ops.NewEngine(st.DB(), cfg, svc, t.TempDir()))
 	srv.RebuildMeta()

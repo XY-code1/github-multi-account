@@ -110,6 +110,7 @@ const state = {
   version: null,
   webhooks: [],
   webhookTypes: [],
+  email: { settings: null, accounts: [], items: [], accountId: "", q: "" },
 };
 
 // ---------------- 路由 ----------------
@@ -120,6 +121,7 @@ const SUBTITLES = {
   todos: "统一待办",
   automation: "自动化任务",
   graph: "关系图谱",
+  email: "邮箱",
   detail: "账号详情",
 };
 
@@ -138,6 +140,7 @@ function go(page) {
   if (page === "todos") loadTodos();
   if (page === "automation") loadAutomation();
   if (page === "graph") loadGraph();
+  if (page === "email") loadEmail();
 }
 
 // ---------------- 账号总览 ----------------
@@ -341,6 +344,7 @@ function renderAccountTable(items) {
           <div>
             <div class="cell-name">${escapeHtml(a.username)}</div>
             <div class="cell-sub">${escapeHtml(a.label || "")}${a.alias ? " · " + escapeHtml(a.alias) : ""}</div>
+            ${a.email ? `<div class="cell-sub cell-email">${escapeHtml(a.email)}</div>` : ""}
           </div>
         </div>
       </td>
@@ -962,6 +966,173 @@ async function loadAutomation() {
   loadWebhookLog();
 }
 
+// ---------------- 邮箱 ----------------
+
+async function loadEmail() {
+  try {
+    const q = state.email.q ? `&q=${encodeURIComponent(state.email.q)}` : "";
+    const acc = state.email.accountId ? `&accountId=${state.email.accountId}` : "";
+    const [settingsResp, messagesResp] = await Promise.all([
+      api("/api/email/settings"),
+      api(`/api/email/messages?limit=200${acc}${q}`),
+    ]);
+    state.email.settings = settingsResp.settings || {};
+    state.email.accounts = settingsResp.accounts || [];
+    state.email.items = messagesResp.items || [];
+    renderEmailAccounts();
+    renderEmailList();
+  } catch (e) {
+    document.getElementById("emailList").innerHTML =
+      `<div class="empty-tab">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderEmailAccounts() {
+  const sel = document.getElementById("emailAccount");
+  const withEmail = (state.email.accounts || []).filter((a) => a.email);
+  sel.innerHTML = `<option value="">全部邮箱（${withEmail.length}）</option>` +
+    withEmail.map((a) =>
+      `<option value="${a.id}">${escapeHtml(a.label || a.username)} · ${escapeHtml(a.email)}</option>`
+    ).join("");
+  sel.value = state.email.accountId || "";
+}
+
+function emailUnbound(n) {
+  const badge = document.getElementById("emailBadge");
+  badge.textContent = n;
+  badge.classList.toggle("hidden", !n);
+}
+
+function highlightCodes(text, code) {
+  const safe = escapeHtml(text || "");
+  if (!code) return safe;
+  const escaped = escapeHtml(code);
+  if (!escaped || !safe.includes(escaped)) return safe;
+  return safe.split(escaped).join(`<span class="code-chip">${escaped}</span>`);
+}
+
+function renderEmailList() {
+  const box = document.getElementById("emailList");
+  const items = state.email.items || [];
+  emailUnbound(items.length);
+  document.getElementById("emailDesc").textContent = items.length
+    ? `共 ${items.length} 封（仅展示，验证码不会自动填充到任何网站）`
+    : "查看账号关联邮箱的通知、安全邮件与验证码（仅展示，不会自动填充到任何网站）";
+  if (!items.length) {
+    box.innerHTML = `<div class="empty-tab">暂无邮件：点「刷新邮件」按配置拉取，或「导入 JSON」手动导入</div>`;
+    return;
+  }
+  const codeBar = items.filter((m) => m.code).slice(0, 3).map((m) =>
+    `<span class="code-chip">${escapeHtml(m.code)}</span>`).join(" ");
+  box.innerHTML = `
+    ${codeBar ? `<div class="mail-code-row" style="margin-bottom:10px">当前验证码 ${codeBar}<span class="page-desc">（仅展示，不会自动填充）</span></div>` : ""}
+    <div class="item-list">${items.map((m) => `
+    <div class="item">
+      <div class="item-body">
+        <div class="item-title">${escapeHtml(m.subject || "(无主题)")}</div>
+        <div class="item-meta">
+          <span class="tag">${escapeHtml(m.sender || "-")}</span>
+          ${m.email ? `<span>${escapeHtml(m.email)}</span>` : ""}
+          <span>${relTime(m.received_at || m.created_at)}</span>
+        </div>
+        <div class="mail-body">${highlightCodes(m.body || "", m.code)}</div>
+        ${m.code ? `<div class="mail-code-row">验证码 <span class="code-chip" data-code="${escapeHtml(m.code)}">${escapeHtml(m.code)}</span><button class="btn btn-sm" data-copy="${escapeHtml(m.code)}">复制</button></div>` : ""}
+      </div>
+    </div>`).join("")}</div>`;
+
+  box.querySelectorAll("[data-copy]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyText(btn.dataset.copy);
+    });
+  });
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(`已复制验证码 ${text}`);
+  } catch (e) {
+    showToast("复制失败，请手动选择验证码");
+  }
+}
+
+async function refreshEmail() {
+  try {
+    const res = await api("/api/email/refresh", { method: "POST", body: "{}" });
+    if (!res.ok) {
+      showToast(res.hint || "拉取未启用：请在「邮箱设置」开启并配置取件链接");
+      return;
+    }
+    const added = res.results.reduce((s, r) => s + (r.added || 0), 0);
+    const codes = res.results.map((r) => r.verificationCode).filter(Boolean);
+    if (codes.length) showToast(`已刷新，新增 ${added} 封；当前验证码 ${codes[0]}`);
+    else showToast(`已刷新，新增 ${added} 封`);
+    await loadEmail();
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+function importEmailFile() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "json,application/json";
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const messages = Array.isArray(data) ? data : (data.messages || []);
+      if (!messages.length) { showToast("文件中没有邮件"); return; }
+      const res = await api("/api/email/import", {
+        method: "POST",
+        body: JSON.stringify({ messages }),
+      });
+      showToast(`导入完成：新增 ${res.added}，跳过 ${res.skipped}`);
+      await loadEmail();
+    } catch (e) {
+      showToast("导入失败：" + e.message);
+    }
+  };
+  input.click();
+}
+
+function openEmailSettings() {
+  const s = state.email.settings || {};
+  document.getElementById("emailEnabled").checked = !!s.enabled;
+  document.getElementById("emailSiteUrl").value = s.site_url || "";
+  document.getElementById("emailApiBase").value = s.api_base || "";
+  document.getElementById("emailToken").value = s.token || "";
+  document.getElementById("emailInterval").value = s.fetch_interval_seconds ?? 300;
+  document.getElementById("emailCodePattern").value = s.code_pattern || "";
+  document.getElementById("emailContext").checked = s.highlight_context !== false;
+  document.getElementById("emailSettingsResult").textContent = "";
+  document.getElementById("emailModal").classList.remove("hidden");
+}
+
+async function saveEmailSettings() {
+  const body = {
+    enabled: document.getElementById("emailEnabled").checked,
+    site_url: document.getElementById("emailSiteUrl").value.trim(),
+    api_base: document.getElementById("emailApiBase").value.trim(),
+    token: document.getElementById("emailToken").value.trim(),
+    fetch_interval_seconds: Number(document.getElementById("emailInterval").value || 0),
+    code_pattern: document.getElementById("emailCodePattern").value.trim(),
+    highlight_context: document.getElementById("emailContext").checked,
+  };
+  try {
+    await api("/api/email/settings", { method: "POST", body: JSON.stringify(body) });
+    document.getElementById("emailModal").classList.add("hidden");
+    showToast("已保存邮箱设置");
+    await loadEmail();
+  } catch (e) {
+    const box = document.getElementById("emailSettingsResult");
+    box.className = "test-result fail";
+    box.textContent = e.message;
+  }
+}
+
 // ---------------- 单账号详情 ----------------
 
 async function openAccountDetail(id) {
@@ -1369,7 +1540,7 @@ function openModal() {
 
 function closeModal() {
   document.getElementById("modal").classList.add("hidden");
-  ["fLabel", "fUsername", "fGroup", "fTags", "fNote", "fToken"].forEach((id) => (document.getElementById(id).value = ""));
+  ["fLabel", "fUsername", "fGroup", "fTags", "fNote", "fEmail", "fToken"].forEach((id) => (document.getElementById(id).value = ""));
   document.getElementById("fType").value = "personal";
   document.getElementById("testResult").textContent = "";
   // 重置 Word 导入
@@ -1407,9 +1578,10 @@ async function saveAccount() {
   const type = document.getElementById("fType").value;
   const tags = document.getElementById("fTags").value.split(",").map((t) => t.trim()).filter(Boolean);
   const note = document.getElementById("fNote").value.trim();
+  const email = document.getElementById("fEmail").value.trim();
   if (!username || !token) { showToast("请填写用户名和 Token"); return; }
   try {
-    await api("/api/accounts", { method: "POST", body: JSON.stringify({ label, username, token, group, type, tags, note }) });
+    await api("/api/accounts", { method: "POST", body: JSON.stringify({ label, username, token, group, type, tags, note, email }) });
     showToast("已保存");
     closeModal();
     await loadAccountsPage(false);
@@ -1764,6 +1936,21 @@ function bindEvents() {
   document.getElementById("webhookAddBtn").addEventListener("click", addWebhook);
   document.getElementById("graphSyncBtn").addEventListener("click", syncGraph);
   document.getElementById("profileRebuildBtn").addEventListener("click", rebuildProfiles);
+
+  document.getElementById("emailRefreshBtn").addEventListener("click", refreshEmail);
+  document.getElementById("emailImportBtn").addEventListener("click", importEmailFile);
+  document.getElementById("emailSettingsBtn").addEventListener("click", openEmailSettings);
+  document.getElementById("emailSettingsClose").addEventListener("click", () => document.getElementById("emailModal").classList.add("hidden"));
+  document.getElementById("emailSettingsSave").addEventListener("click", saveEmailSettings);
+  document.getElementById("emailModal").addEventListener("click", (e) => { if (e.target.id === "emailModal") document.getElementById("emailModal").classList.add("hidden"); });
+  document.getElementById("emailAccount").addEventListener("change", (e) => {
+    state.email.accountId = e.target.value;
+    loadEmail();
+  });
+  document.getElementById("emailSearch").addEventListener("input", debounce(() => {
+    state.email.q = document.getElementById("emailSearch").value.trim();
+    loadEmail();
+  }, 300));
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

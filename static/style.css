@@ -418,6 +418,47 @@ a:hover { text-decoration: underline; }
 }
 .select-sm:hover { background: var(--bg-hover); }
 
+/* 邮箱面板 */
+.input-sm {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  min-width: 220px;
+}
+.input-sm:focus { outline: none; border-color: var(--accent); }
+.mail-body {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
+.mail-code-row {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.code-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: var(--success-soft);
+  color: var(--success);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.5px;
+}
+.cell-email { color: var(--text-faint); }
+
 /* ---------------- 布局 ---------------- */
 
 .layout {

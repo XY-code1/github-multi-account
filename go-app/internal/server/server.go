@@ -101,6 +101,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/actions/star_repo", s.handleActionStarRepo)
 	s.mux.HandleFunc("POST /api/actions/follow_user", s.handleActionFollowUser)
 	s.mux.HandleFunc("POST /api/actions/create_pr", s.handleActionCreatePR)
+	s.mux.HandleFunc("GET /api/email/settings", s.handleGetEmailSettings)
+	s.mux.HandleFunc("POST /api/email/settings", s.handleSaveEmailSettings)
+	s.mux.HandleFunc("GET /api/email/messages", s.handleEmailMessages)
+	s.mux.HandleFunc("POST /api/email/import", s.handleEmailImport)
+	s.mux.HandleFunc("POST /api/email/refresh", s.handleEmailRefresh)
+	s.mux.HandleFunc("DELETE /api/email/messages", s.handleEmailDelete)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("POST /api/sync/settings", s.handleSyncSettings)
 	s.mux.HandleFunc("POST /api/sync/run", s.handleSyncRun)
@@ -133,6 +139,7 @@ type accountIn struct {
 	Tags     []string `json:"tags"`
 	Note     string   `json:"note"`
 	Alias    string   `json:"alias"`
+	Email    string   `json:"email"`
 }
 
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +165,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		Tags:     in.Tags,
 		Note:     in.Note,
 		Alias:    in.Alias,
+		Email:    in.Email,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
@@ -172,6 +180,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		"username":     acc.Username,
 		"group":        acc.Group,
 		"type":         acc.Type,
+		"email":        acc.Email,
 		"token_masked": acc.MaskedToken(),
 	})
 }

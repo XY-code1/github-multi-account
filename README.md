@@ -53,6 +53,7 @@
 - **账号关系图谱** —— 关注关系、共同仓库、共同关注三类边，SVG 力导向布局展示
 - **账号画像自动聚类** —— 按粉丝 / Star / 仓库 / 参与度 / 活跃度做 k-means 分群（核心 / 活跃 / 沉寂），作为打标签参考
 - **主动操作** —— 以指定账号 Star 仓库、关注用户、创建 Pull Request（同仓库分支或 fork 两种模式），写操作前做配额预检，star / follow / PR 均幂等，全部记审计
+- **邮箱面板** —— 查看账号关联邮箱的通知 / 安全邮件 / 登录验证码，验证码高亮 + 一键复制（仅展示，不自动填充），支持导入 JSON 与按配置拉取
 - **主题切换** —— 浅色 / 深色一键切换，默认跟随系统偏好，自动记忆
 - **键盘快捷键** —— 刷新、切标签页、账号导航等全流程键盘操作
 
@@ -221,6 +222,41 @@ MCP 调用有**令牌桶限流**：`sync_all` / `sync_account` / `create_pr` 属
 | POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 / 错峰 / 冷却 / 自适应 |
 | POST | `/api/sync/run` | 立即触发全量同步 |
 | GET | `/api/audit` | 审计日志 |
+| GET | `/api/email/settings` | 邮箱面板配置 + 已关联邮箱的账号 |
+| POST | `/api/email/settings` | 保存邮箱面板配置 |
+| GET | `/api/email/messages` | 本地邮件列表（`accountId` / `q` 筛选） |
+| POST | `/api/email/import` | 导入邮件 JSON（重复 message_id 跳过） |
+| POST | `/api/email/refresh` | 按配置拉取邮件（需先开启并配置取件链接） |
+| DELETE | `/api/email/messages` | 删除邮件（`ids` 或 `accountId`） |
+
+## 邮箱面板
+
+侧栏新增「邮箱」页，用来查看与账号关联的邮箱收到的通知 / 安全邮件 / 登录验证码。**只做展示**：验证码会高亮并提供「复制」按钮，不会自动填到任何外部网站。
+
+- 账号可在「添加账号 / 关联邮箱」填写**邮箱地址或完整取件链接**，列表与详情会展示，邮箱页可按账号筛选。
+- 邮件缓存在本地 SQLite（`email_messages` 表），重复 `message_id` 自动跳过；支持手动「导入 JSON」与「刷新邮件」。
+- 验证码提取：默认在「验证码 / verification / code」等关键词附近找 4-8 位数字或含数字的 6-8 位混合码，可用 `email.code_pattern` 自定义正则。
+
+已与「邮笺」取件接口打通（`GET https://inbox.123456.world/i/{token}/json`，无需额外请求头）：
+
+- 账号「关联邮箱」填 **token**（推荐，如 `kRDIX23C21-gAc8HqopiuZrkY-diBDzrNqTClRypYvw`）或**完整取件链接**；填 token 时按 `email.api_base` 模板拼成 `/i/{token}/json`。
+- 响应结构：`{ok, email, verificationCode, latestMessage, messages[], total, page, pageSize, hasMore, expiresAt}`；顶层 `verificationCode` 会作为「当前验证码」展示，列表页顶部与高亮卡片都会显示。
+- 自动翻页：按 `hasMore` 依次请求 `?page=2...`，最多 `email.max_pages` 页（默认 5）。
+- 邮件字段按 `id/from/subject/body/date` 解析（兼容 `sender/title/text/html/created_at` 等别名），重复 `message_id` 自动跳过。
+
+配置（`config/settings.yaml` 的 `email` 段）：
+
+```yaml
+email:
+  enabled: true
+  site_url: https://inbox.123456.world
+  api_base: https://inbox.123456.world/i/{email}/json   # {email} 会被 URL 编码替换
+  token: ""                     # 预留：如接口后续需要 Bearer 令牌
+  fetch_interval_seconds: 300
+  max_pages: 5
+  code_pattern: ""              # 自定义验证码正则，留空用内置规则
+  highlight_context: true
+```
 
 ## 反风控策略
 
@@ -280,6 +316,7 @@ python -m pytest          # 运行测试套件
 | `app/store.py` | SQLite 快照存储、节流、清理 |
 | `app/db.py` | 同步状态 / 配额 / 审计 / 元数据 / 汇总缓存 |
 | `app/sync.py` | 后台同步引擎（并发限制、失败隔离、指数退避、错峰、自适应间隔、单账号冷却） |
+| `app/email.py` | 邮箱面板（配置、取件 URL 构造、验证码提取、邮件解析与拉取预留） |
 | `app/dashboard.py` | 全局聚合（总览 / 统一待办 / 最近活动） |
 | `app/query.py` | 账号列表服务端查询（分页 / 搜索 / 筛选 / 排序） |
 | `app/notify.py` | 外部通知渠道（Bark / Server酱 / 企业微信 / Webhook） |

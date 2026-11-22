@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import actions, config, dashboard, db, docx, notify, service, store, sync, webhook
+from . import actions, config, dashboard, db, docx, email, notify, service, store, sync, webhook
 from .github import CLIENT_VERSION, GitHubError
 from .query import query_accounts
 
@@ -108,6 +108,7 @@ class AccountIn(BaseModel):
     tags: list[str] = []
     note: str = ""
     alias: str = ""
+    email: str = ""
 
 
 class ExportIn(BaseModel):
@@ -132,6 +133,7 @@ async def create_account(payload: AccountIn) -> dict[str, Any]:
         alias=payload.alias or "",
         note=payload.note or "",
         tags=payload.tags or [],
+        email=payload.email or "",
     )
     db.clear_etags(acc["id"])
     db.audit("accounts.create", acc["id"], acc["username"], "新增/更新账号")
@@ -141,6 +143,7 @@ async def create_account(payload: AccountIn) -> dict[str, Any]:
         "username": acc["username"],
         "group": acc.get("group", ""),
         "type": acc.get("type", "personal"),
+        "email": acc.get("email", ""),
         "token_masked": config.mask_token(acc["token"]),
     }
 
@@ -810,6 +813,128 @@ async def take_snapshot(account_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="账号不存在")
     result = await service.fetch_account_detail(target, force_record=True)
     return {"ok": True, "stats": store.get_stats(target.get("username", "")), "status": result["status"]}
+
+
+# ------------------------------ 邮箱面板 ------------------------------
+
+class EmailSettingsIn(BaseModel):
+    enabled: bool | None = None
+    site_url: str | None = None
+    api_base: str | None = None
+    token: str | None = None
+    fetch_interval_seconds: int | None = None
+    code_pattern: str | None = None
+    highlight_context: bool | None = None
+
+
+class EmailImportIn(BaseModel):
+    accountId: int | None = None
+    messages: list[dict[str, Any]] = []
+
+
+def _email_code(text: str) -> str | None:
+    cfg = email.load_settings()
+    return email.extract_code(
+        text,
+        cfg.get("code_pattern") or "",
+        bool(cfg.get("highlight_context", True)),
+    )
+
+
+@app.get("/api/email/settings")
+async def email_settings() -> dict[str, Any]:
+    """邮箱面板配置 + 已关联邮箱的账号列表。"""
+    accounts = config.load_accounts()
+    return {
+        "settings": email.load_settings(),
+        "accounts": [
+            {
+                "id": a["id"],
+                "username": a.get("username", ""),
+                "label": a.get("label") or a.get("username", ""),
+                "email": a.get("email", ""),
+            }
+            for a in accounts
+        ],
+    }
+
+
+@app.post("/api/email/settings")
+async def save_email_settings(payload: EmailSettingsIn) -> dict[str, Any]:
+    current = email.load_settings()
+    current.update({k: v for k, v in payload.model_dump().items() if v is not None})
+    saved = email.save_settings(current)
+    db.audit("email.settings", detail="更新邮箱面板配置")
+    return {"ok": True, "settings": saved}
+
+
+@app.get("/api/email/messages")
+async def email_messages(accountId: int | None = None, q: str = "", limit: int = 100) -> dict[str, Any]:
+    """本地缓存的邮件列表（可按账号 / 关键字筛选，正文提取验证码仅用于展示）。"""
+    items = db.list_email_messages(account_id=accountId, q=q, limit=limit)
+    for it in items:
+        it["code"] = _email_code(it.get("body") or "")
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/email/import")
+async def email_import(payload: EmailImportIn) -> dict[str, Any]:
+    """导入邮件（JSON），重复的 message_id 跳过。"""
+    accounts = config.load_accounts()
+    by_id = {a["id"]: a for a in accounts}
+    by_email = {a.get("email", "").lower(): a for a in accounts if a.get("email")}
+    added = skipped = 0
+    for m in payload.messages:
+        if not isinstance(m, dict):
+            continue
+        acc = by_id.get(payload.accountId) if payload.accountId else None
+        m_email = str(m.get("email") or "").strip()
+        if acc is None and m_email:
+            acc = by_email.get(m_email.lower())
+        body = str(m.get("body") or "")
+        ok = db.add_email_message(
+            account_id=acc["id"] if acc else None,
+            email=m_email or (acc.get("email", "") if acc else ""),
+            message_id=str(m.get("messageId") or m.get("id") or ""),
+            sender=str(m.get("sender") or ""),
+            subject=str(m.get("subject") or ""),
+            body=body,
+            received_at=str(m.get("receivedAt") or ""),
+            code=_email_code(body),
+        )
+        added += 1 if ok else 0
+        skipped += 0 if ok else 1
+    db.audit("email.import", detail=f"导入邮件 {added} 封（跳过重复 {skipped}）")
+    return {"ok": True, "added": added, "skipped": skipped}
+
+
+@app.post("/api/email/refresh")
+async def email_refresh(accountId: int | None = None) -> dict[str, Any]:
+    """按配置拉取邮件（通用预留实现：取件链接或 api_base 模板）。"""
+    cfg = email.load_settings()
+    if not cfg.get("enabled"):
+        return {"ok": False, "reason": "disabled", "hint": "请先在「邮箱设置」开启 email.enabled"}
+    accounts = config.load_accounts()
+    targets = [a for a in accounts if accountId is None or a["id"] == accountId]
+    targets = [a for a in targets if (a.get("email") or "").strip()]
+    if not targets:
+        return {"ok": False, "reason": "no_account", "hint": "没有填写邮箱的账号"}
+    results = []
+    for acc in targets:
+        results.append({"id": acc["id"], "username": acc["username"],
+                        **await email.fetch_account_mail(acc, cfg)})
+    db.audit("email.refresh", detail=f"刷新邮箱：{len(results)} 个账号")
+    return {"ok": True, "results": results}
+
+
+@app.delete("/api/email/messages")
+async def email_delete(payload: dict[str, Any]) -> dict[str, Any]:
+    ids = [int(i) for i in (payload.get("ids") or []) if str(i).isdigit()]
+    deleted = db.delete_email_messages(
+        account_id=payload.get("accountId"), ids=ids or None
+    )
+    db.audit("email.delete", detail=f"删除邮件 {deleted} 封")
+    return {"ok": True, "deleted": deleted}
 
 
 # ------------------------------ 前端页面 ------------------------------

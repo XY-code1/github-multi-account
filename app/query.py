@@ -66,6 +66,7 @@ def _merged_rows() -> list[dict[str, Any]]:
                 "label": a.get("label", ""),
                 "alias": a.get("alias", ""),
                 "note": a.get("note", ""),
+                "email": a.get("email", ""),
                 "type": a.get("type", "personal"),
                 "group": a.get("group", ""),
                 "tags": a.get("tags", []),

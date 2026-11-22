@@ -127,6 +127,20 @@ CREATE TABLE IF NOT EXISTS webhook_log (
 	ok INTEGER DEFAULT 0,
 	detail TEXT
 );
+
+-- 邮箱面板：本地缓存的邮件（仅用于展示，不参与任何自动填充）
+CREATE TABLE IF NOT EXISTS email_messages (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	account_id INTEGER,
+	email TEXT,
+	message_id TEXT,
+	sender TEXT,
+	subject TEXT,
+	body TEXT,
+	code TEXT,
+	received_at TEXT,
+	created_at TEXT
+);
 `
 
 var (

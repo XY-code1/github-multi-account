@@ -37,6 +37,7 @@ type AccountRow struct {
 	Label               string   `json:"label"`
 	Alias               string   `json:"alias"`
 	Note                string   `json:"note"`
+	Email               string   `json:"email"`
 	Type                string   `json:"type"`
 	Group               string   `json:"group"`
 	Tags                []string `json:"tags"`
@@ -168,6 +169,7 @@ func QueryAccounts(db *sql.DB, accounts []config.Account, q AccountQuery) (*Acco
 			Label:               label,
 			Alias:               a.Alias,
 			Note:                a.Note,
+			Email:               a.Email,
 			Type:                typed,
 			Group:               a.Group,
 			Tags:                tags,

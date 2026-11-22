@@ -123,6 +123,7 @@ def load_accounts() -> list[dict[str, Any]]:
                 "type": acc.get("type") or "personal",
                 "alias": acc.get("alias") or "",
                 "note": acc.get("note") or "",
+                "email": acc.get("email") or "",
                 "tags": tags,
                 "token": token,
             }
@@ -154,6 +155,7 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
                 "type": a.get("type", "personal"),
                 "alias": a.get("alias", ""),
                 "note": a.get("note", ""),
+                "email": a.get("email", ""),
                 "tags": a.get("tags", []),
                 "token_encrypted": encrypt_text(a.get("token", ""), key),
             }
@@ -185,6 +187,7 @@ def add_account(
     alias: str = "",
     note: str = "",
     tags: list[str] | None = None,
+    email: str = "",
 ) -> dict[str, Any]:
     accounts = load_accounts()
     fields = {
@@ -194,6 +197,7 @@ def add_account(
         "type": type_ if type_ in ("personal", "bot", "org") else "personal",
         "alias": alias,
         "note": note,
+        "email": email or "",
         "tags": tags or [],
     }
     for acc in accounts:
@@ -252,6 +256,8 @@ def export_backup(
                 "note": a.get("note", ""),
                 "tags": a.get("tags", []),
                 **({"token": a["token"]} if include_credentials else {}),
+                # 关联邮箱可能是公开取件 token，按凭据处理：只在加密的凭据备份中导出
+                **({"email": a.get("email", "")} if include_credentials else {}),
             }
             for a in accounts
         ],
@@ -300,6 +306,8 @@ def import_backup(payload: dict[str, Any], password: str | None = None) -> dict[
         alias = alias if isinstance(alias, str) else ""
         note = item.get("note")
         note = note if isinstance(note, str) else ""
+        email_addr = item.get("email")
+        email_addr = email_addr if isinstance(email_addr, str) else ""
         tags = item.get("tags") or []
         if isinstance(tags, str):
             tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -313,6 +321,7 @@ def import_backup(payload: dict[str, Any], password: str | None = None) -> dict[
             existing["type"] = atype
             existing["alias"] = alias
             existing["note"] = note
+            existing["email"] = email_addr
             existing["tags"] = tags
             updated += 1
         else:
@@ -325,6 +334,7 @@ def import_backup(payload: dict[str, Any], password: str | None = None) -> dict[
                     "type": atype,
                     "alias": alias,
                     "note": note,
+                    "email": email_addr,
                     "tags": tags,
                     "token": token,
                 }

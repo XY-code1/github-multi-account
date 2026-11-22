@@ -23,6 +23,7 @@ type Account struct {
 	Tags     []string
 	Note     string
 	Alias    string
+	Email    string
 	Token    string
 }
 
@@ -62,6 +63,7 @@ type rawAccount struct {
 	Tags           TagList  `yaml:"tags"`
 	Note           string   `yaml:"note"`
 	Alias          string   `yaml:"alias"`
+	Email          string   `yaml:"email"`
 	Token          string   `yaml:"token"`
 	TokenEncrypted string   `yaml:"token_encrypted"`
 }
@@ -210,6 +212,7 @@ func (s *Store) Accounts() ([]Account, error) {
 			Tags:     a.Tags,
 			Note:     a.Note,
 			Alias:    a.Alias,
+			Email:    a.Email,
 			Token:    token,
 		})
 	}
@@ -248,6 +251,7 @@ func (s *Store) writeLocked(accounts []Account) error {
 			Tags:           TagList(nonNil(a.Tags)),
 			Note:           a.Note,
 			Alias:          a.Alias,
+			Email:          a.Email,
 			TokenEncrypted: enc,
 		})
 	}
@@ -359,6 +363,8 @@ func (s *Store) Export(includeCredentials bool, password string) (map[string]any
 		}
 		if includeCredentials {
 			item["token"] = a.Token
+			// 关联邮箱可能是公开取件 token，按凭据处理：只在加密的凭据备份中导出
+			item["email"] = a.Email
 		}
 		out = append(out, item)
 	}
@@ -387,8 +393,16 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 	if !ok {
 		return 0, 0, 0, errors.New("备份格式不正确：缺少 accounts 字段")
 	}
-	items, ok := raw.([]any)
-	if !ok {
+	var items []any
+	switch list := raw.(type) {
+	case []any:
+		items = list
+	case []map[string]any:
+		// 兼容直接传入 Go 导出结果的场景（HTTP JSON 反序列化后是 []any）
+		for _, m := range list {
+			items = append(items, m)
+		}
+	default:
 		return 0, 0, 0, errors.New("备份格式不正确：accounts 应为列表")
 	}
 	accounts, err := s.Accounts()
@@ -418,6 +432,7 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 		}
 		alias, _ := m["alias"].(string)
 		note, _ := m["note"].(string)
+		emailAddr, _ := m["email"].(string)
 		tags := toTags(m["tags"])
 		found := false
 		for i := range accounts {
@@ -428,6 +443,7 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 				accounts[i].Type = atype
 				accounts[i].Alias = alias
 				accounts[i].Note = note
+				accounts[i].Email = emailAddr
 				accounts[i].Tags = tags
 				updated++
 				found = true
@@ -437,7 +453,7 @@ func (s *Store) Import(payload map[string]any, password string) (added, updated,
 		if !found {
 			accounts = append(accounts, Account{
 				Label: label, Username: username, Group: group, Type: atype,
-				Alias: alias, Note: note, Tags: tags, Token: token,
+				Alias: alias, Note: note, Email: emailAddr, Tags: tags, Token: token,
 			})
 			added++
 		}
