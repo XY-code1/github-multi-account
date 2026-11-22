@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -55,11 +56,12 @@ type tool struct {
 
 // Server 是 MCP 服务端。
 type Server struct {
-	cfg    *config.Store
-	db     *sql.DB
-	svc    *service.Service
-	engine *ops.Engine
-	tools  []tool
+	cfg     *config.Store
+	db      *sql.DB
+	svc     *service.Service
+	engine  *ops.Engine
+	limiter *limiter
+	tools   []tool
 }
 
 // Run 启动 stdio MCP 服务（阻塞）。
@@ -81,10 +83,11 @@ func Run(baseDir string) error {
 	}
 
 	s := &Server{
-		cfg:    cfg,
-		db:     st.DB(),
-		svc:    &service.Service{Store: st},
-		engine: ops.NewEngine(st.DB(), cfg, &service.Service{Store: st}, configDir(baseDir)),
+		cfg:     cfg,
+		db:      st.DB(),
+		svc:     &service.Service{Store: st},
+		engine:  ops.NewEngine(st.DB(), cfg, &service.Service{Store: st}, configDir(baseDir)),
+		limiter: newLimiter(configDir(baseDir)),
 	}
 	s.registerTools()
 	return s.serve(os.Stdin, os.Stdout)
@@ -158,6 +161,18 @@ func (s *Server) callTool(req request) *response {
 	for _, t := range s.tools {
 		if t.name != params.Name {
 			continue
+		}
+		// 限流：重量工具（sync_all / sync_account / create_pr）使用更严格的桶
+		if s.limiter != nil {
+			if ok, wait, desc := s.limiter.allow(t.name); !ok {
+				return &response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"content": []map[string]any{{"type": "text", "text": fmt.Sprintf(
+						"错误: MCP 限流：%s 调用过于频繁，请等待约 %d 秒后重试（%s）",
+						t.name, int(math.Ceil(wait)), desc,
+					)}},
+					"isError": true,
+				}}
+			}
 		}
 		text, err := t.handle(context.Background(), params.Arguments)
 		if err != nil {
@@ -243,6 +258,12 @@ func (s *Server) registerTools() {
 				"limit": "条数，默认 20",
 			}),
 			handle: s.handleGetAudit,
+		},
+		{
+			name:        "mcp_status",
+			description: "查看 MCP 限流配置与当前令牌桶剩余（普通 / 重量工具）",
+			schema:      objectSchema(map[string]any{}),
+			handle:      s.handleMCPStatus,
 		},
 		{
 			name:        "star_repo",
@@ -533,6 +554,13 @@ func (s *Server) handleCreatePR(ctx context.Context, args map[string]any) (strin
 func boolArg(args map[string]any, key string) bool {
 	v, _ := args[key].(bool)
 	return v
+}
+
+func (s *Server) handleMCPStatus(_ context.Context, _ map[string]any) (string, error) {
+	if s.limiter == nil {
+		return textResult(map[string]any{"enabled": false})
+	}
+	return textResult(s.limiter.status())
 }
 
 func strArg(args map[string]any, key string) string {

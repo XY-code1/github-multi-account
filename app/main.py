@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import actions, config, dashboard, db, docx, notify, service, store, sync, webhook
-from .github import GitHubError
+from .github import CLIENT_VERSION, GitHubError
 from .query import query_accounts
 
 logger = logging.getLogger("ghdashboard")
@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
     await sync_engine.stop()
 
 
-app = FastAPI(title="GitHub 多账号状态仪表盘", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="GitHub 多账号状态仪表盘", version=CLIENT_VERSION, lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -599,6 +599,13 @@ class SyncSettingsIn(BaseModel):
     max_retries: int | None = None
     base_backoff_seconds: int | None = None
     max_backoff_seconds: int | None = None
+    quota_floor: int | None = None
+    # 反风控：单账号同步冷却 / 错峰 / 按配额自适应间隔
+    min_sync_interval_seconds: int | None = None
+    stagger_seconds: int | None = None
+    max_interval_seconds: int | None = None
+    adaptive_interval: bool | None = None
+    quota_low_ratio: float | None = None
 
 
 @app.post("/api/sync/settings")

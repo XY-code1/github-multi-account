@@ -14,7 +14,7 @@
 
 ## 核心能力
 
-- **后台同步引擎**：定时同步所有账号（默认 15 分钟、并发 3），失败隔离 + 指数退避重试，结果写入本地缓存
+- **后台同步引擎**：定时同步所有账号（默认 15 分钟、并发 5），失败隔离 + 指数退避重试，结果写入本地缓存；带错峰、按配额自适应间隔、单账号冷却等反风控策略
 - **全局聚合接口**：`/api/dashboard/summary`、`/api/dashboard/tasks`、`/api/dashboard/activities`，全部读缓存，打开页面不会打爆 GitHub
 - **服务端账号查询**：`page`/`pageSize`/`query`/`status`/`type`/`group`/`tags`/`sort`/`order`，支持数百账号
 - **账号元数据**：别名、内部编号、标签、分组、备注、类型（个人/Bot/组织）
@@ -214,11 +214,45 @@ exe 内置 MCP 服务，可让 Claude / Cursor 直接操作运维中心：
 GitHub仪表盘.exe --mcp
 ```
 
-把它配置成 MCP 客户端的 stdio 服务即可。支持的工具：`list_accounts`、`get_todos`、`get_summary`、`get_account_detail`、`sync_account`、`sync_all`、`batch_tag`、`get_audit`，以及写操作 `star_repo`（参数 `accountId` / `owner` / `repo`）、`follow_user`（`accountId` / `username`）、`create_pr`（`accountId` / `repo` / `title`，可选 `base` / `head` / `body` / `draft` / `fork` / `branch` / `filePath` / `fileContent`）。写操作同样先做配额预检并记审计。
+把它配置成 MCP 客户端的 stdio 服务即可。支持的工具：`list_accounts`、`get_todos`、`get_summary`、`get_account_detail`、`sync_account`、`sync_all`、`batch_tag`、`get_audit`、`mcp_status`，以及写操作 `star_repo`（参数 `accountId` / `owner` / `repo`）、`follow_user`（`accountId` / `username`）、`create_pr`（`accountId` / `repo` / `title`，可选 `base` / `head` / `body` / `draft` / `fork` / `branch` / `filePath` / `fileContent`）。写操作同样先做配额预检并记审计。
+
+MCP 调用有**令牌桶限流**：`sync_all` / `sync_account` / `create_pr` 属于重量工具，用更小更慢的桶（默认 2 次容量、每 10 秒补充 1 个）；其余工具共用普通桶（默认 8 次容量、每 4 秒补充 1 个）。触发限流时工具返回 `isError`，文本里给出建议等待秒数与桶状态；`mcp_status` 可随时查看配置与剩余令牌。
 | GET | `/api/tasks` | 同步引擎进度与配置 |
-| POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 |
+| POST | `/api/sync/settings` | 配置并发 / 间隔 / 退避 / 错峰 / 冷却 / 自适应 |
 | POST | `/api/sync/run` | 立即触发全量同步 |
 | GET | `/api/audit` | 审计日志 |
+
+## 反风控策略
+
+为降低被 GitHub 风控的概率，同步调度与 MCP 调用都做了限速设计，**原有 ETag 增量同步与失败指数退避保持不变**。
+
+**同步调度**（`config/settings.yaml` 的 `sync` 段，也可通过 `POST /api/sync/settings` 调整）：
+
+```yaml
+sync:
+  interval_seconds: 900              # 基础间隔
+  concurrency: 5
+  quota_floor: 100                   # 单账号剩余低于该值时本轮跳过
+  min_sync_interval_seconds: 60      # 单账号冷却：该秒内不重复拉取
+  stagger_seconds: 15                # 错峰：同轮内每个账号随机延迟 0~15s 再发请求
+  max_interval_seconds: 3600         # 自适应间隔上限
+  adaptive_interval: true            # 跳过占比 ≥ quota_low_ratio 时下一轮间隔翻倍
+  quota_low_ratio: 0.5
+```
+
+**MCP 限流**（`config/settings.yaml` 的 `mcp` 段，改完自动热加载，无需重启 exe）：
+
+```yaml
+mcp:
+  enabled: true
+  bucket_capacity: 8                 # 普通工具桶容量
+  refill_per_second: 0.25            # 普通工具桶补充速率（个/秒）
+  heavy_tools: [sync_all, sync_account, create_pr]
+  heavy_capacity: 2
+  heavy_refill_per_second: 0.1
+```
+
+**请求行为**：Python 与 Go 双端使用统一的 `User-Agent: github-multi-account/<版本>`；列表类端点（`review_prs` / `my_prs` / `issues` / `events`）一律带 `If-None-Match` 条件请求，304 不计配额；同一账号在冷却期内不会被重复拉取（MCP 的 `sync_account` / `sync_all` 同样受冷却约束）。
 
 ## 技术栈
 
@@ -245,7 +279,7 @@ python -m pytest          # 运行测试套件
 | `app/crypto.py` | Fernet 加解密与本机密钥管理 |
 | `app/store.py` | SQLite 快照存储、节流、清理 |
 | `app/db.py` | 同步状态 / 配额 / 审计 / 元数据 / 汇总缓存 |
-| `app/sync.py` | 后台同步引擎（并发限制、失败隔离、指数退避） |
+| `app/sync.py` | 后台同步引擎（并发限制、失败隔离、指数退避、错峰、自适应间隔、单账号冷却） |
 | `app/dashboard.py` | 全局聚合（总览 / 统一待办 / 最近活动） |
 | `app/query.py` | 账号列表服务端查询（分页 / 搜索 / 筛选 / 排序） |
 | `app/notify.py` | 外部通知渠道（Bark / Server酱 / 企业微信 / Webhook） |
@@ -268,7 +302,7 @@ python -m pytest          # 运行测试套件
 
 **备份文件安全吗？** 页面导出分两种：**账号信息备份默认不含凭据**（只含用户名 / 别名 / 标签等）；如需备份 Token，用「导出凭据（加密）」，会要求设置密码（PBKDF2 + AES-GCM）。日常使用时 Token 是加密存储的。
 
-**几百个账号会不会打爆 GitHub？** 不会。所有数据由后台同步引擎定时写入本地缓存（`data/dashboard.db` 的 `summaries` 表），页面只读缓存。默认 15 分钟同步一次、并发 3，可在「设置」里调整。
+**几百个账号会不会打爆 GitHub？** 不会。所有数据由后台同步引擎定时写入本地缓存（`data/dashboard.db` 的 `summaries` 表），页面只读缓存。默认 15 分钟同步一次、并发 5，并带错峰（同轮随机延迟）、按配额自适应拉长间隔、单账号冷却，详见「反风控策略」。
 
 **历史数据存在哪？** `data/dashboard.db`（SQLite），已在 `.gitignore` 中。启动时会自动清理：超过 90 天或每个账号超过 1000 条的旧快照会被删除。删除该文件会清空所有历史趋势，但不影响账号配置。
 

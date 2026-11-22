@@ -17,6 +17,14 @@ import (
 // BaseURL 是 API 根地址，测试时可替换为 httptest 服务器。
 var BaseURL = "https://api.github.com"
 
+// ClientVersion 是客户端版本，与 Python 版 app/github.py 的 CLIENT_VERSION、
+// server.Version 保持一致（改版本时三处同步）。
+const ClientVersion = "1.3.0"
+
+// UserAgent 是统一的请求标识：GitHub 建议可识别的 UA，双端一致，
+// 便于被风控时定位来源。
+const UserAgent = "github-multi-account/" + ClientVersion
+
 // Error 表示 GitHub API 返回的错误。
 type Error struct {
 	Status  int
@@ -91,7 +99,7 @@ func (c *Client) newRequest(method, u string, body io.Reader) (*http.Request, er
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "github-account-dashboard")
+	req.Header.Set("User-Agent", UserAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

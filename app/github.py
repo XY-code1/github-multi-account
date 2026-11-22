@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.github.com"
 
+# 客户端版本：与 Go 版 internal/github.UserAgent、server.Version 保持一致。
+CLIENT_VERSION = "1.3.0"
+# 统一的 User-Agent：GitHub 建议可识别的 UA，双端一致，便于被风控时定位来源。
+USER_AGENT = f"github-multi-account/{CLIENT_VERSION}"
+
 # 执行写操作（star / follow / 建 PR）前要求 core 配额至少剩余的次数。
 # 低于该值时直接拒绝，避免写操作本身把配额打穿、影响后台同步。
 QUOTA_RESERVE = 50
@@ -43,7 +48,7 @@ class GitHubClient:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "github-account-dashboard",
+                "User-Agent": USER_AGENT,
             },
             timeout=timeout,
             **kwargs,

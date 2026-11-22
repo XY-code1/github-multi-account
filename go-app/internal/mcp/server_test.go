@@ -30,10 +30,11 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("建账号失败: %v", err)
 	}
 	s := &Server{
-		cfg:    cfg,
-		db:     st.DB(),
-		svc:    &service.Service{Store: st},
-		engine: ops.NewEngine(st.DB(), cfg, &service.Service{Store: st}, base+"/config"),
+		cfg:     cfg,
+		db:      st.DB(),
+		svc:     &service.Service{Store: st},
+		engine:  ops.NewEngine(st.DB(), cfg, &service.Service{Store: st}, base+"/config"),
+		limiter: newLimiter(base + "/config"),
 	}
 	s.registerTools()
 	return s

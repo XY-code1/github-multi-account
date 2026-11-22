@@ -32,6 +32,16 @@ type Config struct {
 	MaxBackoffSeconds  int  `json:"max_backoff_seconds" yaml:"max_backoff_seconds"`
 	// 单账号剩余配额低于该值时本轮跳过，避免把配额打满
 	QuotaFloor int `json:"quota_floor" yaml:"quota_floor"`
+	// 反风控：单账号同步冷却（秒），该时间内重复同步直接返回 throttled
+	MinSyncIntervalSeconds int `json:"min_sync_interval_seconds" yaml:"min_sync_interval_seconds"`
+	// 反风控：同一轮内每个账号启动前随机延迟 0~该秒数（错峰）
+	StaggerSeconds int `json:"stagger_seconds" yaml:"stagger_seconds"`
+	// 自适应间隔上限（秒）
+	MaxIntervalSeconds int `json:"max_interval_seconds" yaml:"max_interval_seconds"`
+	// 是否启用按配额自适应间隔
+	AdaptiveInterval bool `json:"adaptive_interval" yaml:"adaptive_interval"`
+	// 本轮被跳过的账号占比达到该值时拉长下一轮间隔
+	QuotaLowRatio float64 `json:"quota_low_ratio" yaml:"quota_low_ratio"`
 }
 
 // DefaultConfig 是默认配置。
@@ -43,7 +53,12 @@ func DefaultConfig() Config {
 		MaxRetries:         3,
 		BaseBackoffSeconds: 60,
 		MaxBackoffSeconds:  3600,
-		QuotaFloor:         100,
+		QuotaFloor:             100,
+		MinSyncIntervalSeconds: 60,
+		StaggerSeconds:         15,
+		MaxIntervalSeconds:     3600,
+		AdaptiveInterval:       true,
+		QuotaLowRatio:          0.5,
 	}
 }
 
@@ -64,16 +79,24 @@ type Result struct {
 	Total  int `json:"total"`
 	Done   int `json:"done"`
 	Failed int `json:"failed"`
+	// Skipped 是一轮中没有真正发起同步的账号数（配额不足 / 退避 / 冷却）
+	Skipped int `json:"skipped"`
 }
 
 // SettingsUpdate 是同步配置的部分更新（nil 表示不修改）。
 type SettingsUpdate struct {
-	Enabled            *bool `json:"enabled"`
-	IntervalSeconds    *int  `json:"interval_seconds"`
-	Concurrency        *int  `json:"concurrency"`
-	MaxRetries         *int  `json:"max_retries"`
-	BaseBackoffSeconds *int  `json:"base_backoff_seconds"`
-	MaxBackoffSeconds  *int  `json:"max_backoff_seconds"`
+	Enabled                *bool    `json:"enabled"`
+	IntervalSeconds        *int     `json:"interval_seconds"`
+	Concurrency            *int     `json:"concurrency"`
+	MaxRetries             *int     `json:"max_retries"`
+	BaseBackoffSeconds     *int     `json:"base_backoff_seconds"`
+	MaxBackoffSeconds      *int     `json:"max_backoff_seconds"`
+	QuotaFloor             *int     `json:"quota_floor"`
+	MinSyncIntervalSeconds *int     `json:"min_sync_interval_seconds"`
+	StaggerSeconds         *int     `json:"stagger_seconds"`
+	MaxIntervalSeconds     *int     `json:"max_interval_seconds"`
+	AdaptiveInterval       *bool    `json:"adaptive_interval"`
+	QuotaLowRatio          *float64 `json:"quota_low_ratio"`
 }
 
 // Engine 是后台同步引擎。
@@ -82,12 +105,13 @@ type Engine struct {
 	cfg  *config.Store
 	svc  *service.Service
 	dir  string
-	mu   sync.Mutex
-	conf Config
-	prog Progress
-	stop chan struct{}
-	once sync.Once
-	loop bool
+	mu       sync.Mutex
+	conf     Config
+	prog     Progress
+	stop     chan struct{}
+	once     sync.Once
+	loop     bool
+	lastSync map[int]time.Time
 }
 
 // NewEngine 创建引擎并加载已保存的配置。
@@ -97,8 +121,9 @@ func NewEngine(db *sql.DB, cfg *config.Store, svc *service.Service, configDir st
 		cfg:  cfg,
 		svc:  svc,
 		dir:  configDir,
-		conf: LoadSettings(configDir),
-		prog: Progress{Status: "idle"},
+		conf:     LoadSettings(configDir),
+		prog:     Progress{Status: "idle"},
+		lastSync: map[int]time.Time{},
 	}
 	return e
 }
@@ -132,7 +157,37 @@ func LoadSettings(dir string) Config {
 	if v, ok := asInt(raw["quota_floor"]); ok && v != 0 {
 		cfg.QuotaFloor = v
 	}
+	if v, ok := asInt(raw["min_sync_interval_seconds"]); ok && v > 0 {
+		cfg.MinSyncIntervalSeconds = v
+	}
+	if v, ok := asInt(raw["stagger_seconds"]); ok && v > 0 {
+		cfg.StaggerSeconds = v
+	}
+	if v, ok := asInt(raw["max_interval_seconds"]); ok && v > 0 {
+		cfg.MaxIntervalSeconds = v
+	}
+	if v, ok := raw["adaptive_interval"].(bool); ok {
+		cfg.AdaptiveInterval = v
+	}
+	if v, ok := asFloat(raw["quota_low_ratio"]); ok && v > 0 {
+		cfg.QuotaLowRatio = v
+	}
 	return cfg
+}
+
+func asFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
 }
 
 func asInt(v any) (int, bool) {
@@ -177,6 +232,24 @@ func (e *Engine) Configure(u SettingsUpdate) Config {
 	}
 	if u.MaxBackoffSeconds != nil {
 		c.MaxBackoffSeconds = *u.MaxBackoffSeconds
+	}
+	if u.QuotaFloor != nil {
+		c.QuotaFloor = *u.QuotaFloor
+	}
+	if u.MinSyncIntervalSeconds != nil {
+		c.MinSyncIntervalSeconds = *u.MinSyncIntervalSeconds
+	}
+	if u.StaggerSeconds != nil {
+		c.StaggerSeconds = *u.StaggerSeconds
+	}
+	if u.MaxIntervalSeconds != nil {
+		c.MaxIntervalSeconds = *u.MaxIntervalSeconds
+	}
+	if u.AdaptiveInterval != nil {
+		c.AdaptiveInterval = *u.AdaptiveInterval
+	}
+	if u.QuotaLowRatio != nil {
+		c.QuotaLowRatio = *u.QuotaLowRatio
 	}
 	e.conf = c
 	if err := SaveSettings(e.dir, c); err != nil {
@@ -258,26 +331,51 @@ func (e *Engine) loopRun() {
 		}
 
 		started := time.Now()
-		e.SyncAll(nil)
+		result := e.SyncAll(nil)
 		elapsed := time.Since(started)
 
 		e.mu.Lock()
 		e.prog.DurationSeconds = round1(elapsed.Seconds())
 		e.mu.Unlock()
 
-		// 自适应间隔：本轮耗时超过间隔时延长下一轮，避免积压。
-		// 只影响本地循环变量，不回写用户配置。
-		if base > 0 && elapsed > time.Duration(interval)*time.Second {
-			next := int(elapsed.Seconds()*1.2) + 60
-			if cap := maxInt(base*3, 3600); next > cap {
-				next = cap
-			}
-			log.Printf("同步耗时 %.0fs 超过间隔，下一轮间隔调整为 %ds", elapsed.Seconds(), next)
-			interval = next
-		} else {
-			interval = base
+		// 自适应间隔：本轮多数账号因配额/冷却被跳过时拉长下一轮，
+		// 避免在配额紧张期继续按固定频率空转；否则沿用原有的耗时保护逻辑。
+		cfg := e.Config()
+		newInterval := nextInterval(base, interval, result.Total, result.Skipped, elapsed, cfg)
+		if newInterval != interval {
+			log.Printf("下一轮同步间隔 %ds → %ds（本轮 %d/%d 个账号因配额/冷却跳过，耗时 %.0fs）",
+				interval, newInterval, result.Skipped, result.Total, elapsed.Seconds())
 		}
+		interval = newInterval
 	}
+}
+
+// nextInterval 计算下一轮同步间隔：配额紧张（跳过占比达标）优先拉长，
+// 其次沿用"本轮耗时超过间隔"的保护逻辑，否则回到基础间隔。
+func nextInterval(base, current, total, skipped int, elapsed time.Duration, cfg Config) int {
+	maxInterval := cfg.MaxIntervalSeconds
+	if maxInterval <= 0 {
+		maxInterval = maxInt(base*4, 3600)
+	}
+	if cfg.AdaptiveInterval && total > 0 && cfg.QuotaLowRatio > 0 &&
+		float64(skipped)/float64(total) >= cfg.QuotaLowRatio {
+		return minInt(maxInt(current*2, base*2), maxInterval)
+	}
+	if base > 0 && elapsed > time.Duration(current)*time.Second {
+		next := int(elapsed.Seconds()*1.2) + 60
+		if cap := maxInt(base*3, 3600); next > cap {
+			next = cap
+		}
+		return next
+	}
+	return base
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func maxInt(a, b int) int {
@@ -327,7 +425,7 @@ func (e *Engine) SyncAll(onlyIDs []int) Result {
 	sem := make(chan struct{}, max1(cfg.Concurrency))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	done, failed := 0, 0
+	done, failed, skipped := 0, 0, 0
 
 	for _, a := range accounts {
 		wg.Add(1)
@@ -336,17 +434,25 @@ func (e *Engine) SyncAll(onlyIDs []int) Result {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			// 错峰：随机延迟后再发请求，避免同一时刻并发尖峰
+			if cfg.StaggerSeconds > 0 {
+				time.Sleep(time.Duration(rand.Float64() * float64(cfg.StaggerSeconds)) * time.Second)
+			}
+
 			e.mu.Lock()
 			e.prog.Current = acc.Username
 			e.mu.Unlock()
 
-			ok, _, _ := e.SyncAccount(acc)
+			ok, status, _ := e.SyncAccount(acc)
 
 			mu.Lock()
 			if ok {
 				done++
-			} else {
+				} else {
 				failed++
+			}
+			if status == "skipped" || status == "deferred" || status == "throttled" {
+				skipped++
 			}
 			e.mu.Lock()
 			e.prog.Done = done
@@ -363,7 +469,25 @@ func (e *Engine) SyncAll(onlyIDs []int) Result {
 	e.prog.Current = ""
 	e.mu.Unlock()
 
-	return Result{Total: len(accounts), Done: done, Failed: failed}
+	return Result{Total: len(accounts), Done: done, Failed: failed, Skipped: skipped}
+}
+
+// markSynced 记录账号本轮已发起同步（用于单账号冷却判定）。
+func (e *Engine) markSynced(aid int) {
+	e.mu.Lock()
+	e.lastSync[aid] = time.Now()
+	e.mu.Unlock()
+}
+
+// inCooldown 报告该账号是否处于同步冷却期（min_sync_interval_seconds 内不重复拉取）。
+func (e *Engine) inCooldown(aid int, cfg Config) bool {
+	if cfg.MinSyncIntervalSeconds <= 0 {
+		return false
+	}
+	e.mu.Lock()
+	last, seen := e.lastSync[aid]
+	e.mu.Unlock()
+	return seen && time.Since(last) < time.Duration(cfg.MinSyncIntervalSeconds)*time.Second
 }
 
 // SyncAccount 同步单个账号：失败隔离 + 指数退避。返回是否成功。
@@ -377,11 +501,18 @@ func (e *Engine) SyncAccount(acc config.Account) (bool, string, string) {
 	if rl, ok := limits[aid]; ok && rl.Remaining < e.Config().QuotaFloor {
 		return false, "skipped", "quota_low"
 	}
+	// 退避期优先表达 deferred（失败重试调度的一部分）
 	if state != nil && state.NextRetryAt != "" {
 		if t, err := time.Parse(time.RFC3339, state.NextRetryAt); err == nil && time.Now().UTC().Before(t) {
 			return false, "deferred", ""
 		}
 	}
+	// 单账号冷却：刚同步过的账号不重复拉取（防止 MCP / 手动在短时间内重复触发）
+	sched := e.Config()
+	if e.inCooldown(aid, sched) {
+		return false, "throttled", "cooldown"
+	}
+	e.markSynced(aid)
 
 	// 增量同步：带上各端点的 ETag，未变化（304）不消耗 API 配额
 	etags := map[string]string{}

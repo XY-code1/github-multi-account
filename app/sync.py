@@ -1,26 +1,40 @@
 """后台同步引擎：定时同步所有账号，失败隔离 + 指数退避重试。
 
 设计要点（面向几百个账号）：
-- 并发限制（默认 3，可配置），避免瞬间打满带宽；
+- 并发限制（默认 5，可配置），避免瞬间打满带宽；
 - 单账号失败不影响其他账号；
 - 连续失败后按指数退避推迟重试（60s → 120s → 240s，上限 1 小时，带抖动）；
 - 同步结果写入 summaries 表，仪表盘读缓存，不实时请求 GitHub；
 - 记录 API 配额与同步状态，供"需要关注"判断使用。
 
+反风控调度（不改变原有 ETag 增量同步与失败退避）：
+- 错峰：同一轮内每个账号启动前随机延迟 0~stagger_seconds，避免瞬时并发尖峰；
+- 自适应间隔：本轮因配额/冷却跳过的账号占比超过 quota_low_ratio 时，
+  下一轮间隔自动拉长（上限 max_interval_seconds），配额充裕后回落；
+- 单账号冷却：同一账号在 min_sync_interval_seconds 内不重复拉取，
+  防止 MCP / 手动同步在短时间内重复触发相同请求。
+
 配置（config/settings.yaml）：
     sync:
       enabled: true
       interval_seconds: 900
-      concurrency: 3
+      concurrency: 5
       max_retries: 3
       base_backoff_seconds: 60
       max_backoff_seconds: 3600
+      quota_floor: 100
+      min_sync_interval_seconds: 60
+      stagger_seconds: 15
+      max_interval_seconds: 3600
+      adaptive_interval: true
+      quota_low_ratio: 0.5
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +45,10 @@ from . import config, db, service, webhook
 
 logger = logging.getLogger(__name__)
 
+# 这些状态表示"本轮没有真正发起同步"（配额不足 / 退避 / 冷却），
+# 用于自适应间隔判断是否需要拉长下一轮。
+SKIP_STATUSES = frozenset({"skipped", "deferred", "throttled"})
+
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "interval_seconds": 900,
@@ -40,6 +58,16 @@ DEFAULTS: dict[str, Any] = {
     "max_backoff_seconds": 3600,
     # 单账号剩余配额低于该值时本轮跳过，避免把配额打满
     "quota_floor": 100,
+    # 单账号同步冷却：该秒数内重复同步直接返回 throttled（防止 MCP / 手动重复触发）
+    "min_sync_interval_seconds": 60,
+    # 错峰：同一轮内每个账号启动前随机延迟 0~该秒数
+    "stagger_seconds": 15,
+    # 自适应间隔上限（配额紧张时拉长到该值为止）
+    "max_interval_seconds": 3600,
+    # 是否启用按配额自适应间隔
+    "adaptive_interval": True,
+    # 本轮被跳过（配额不足/冷却/退避）的账号占比达到该值时拉长下一轮间隔
+    "quota_low_ratio": 0.5,
 }
 
 
@@ -69,6 +97,34 @@ def load_settings() -> dict[str, Any]:
     return cfg
 
 
+def next_interval(
+    *,
+    base: int,
+    elapsed: float,
+    total: int,
+    skipped: int,
+    current: int,
+    cfg: dict[str, Any],
+) -> int:
+    """计算下一轮同步间隔。
+
+    优先级：配额紧张（跳过占比达标）> 本轮耗时过长 > 回到基础间隔。
+    仅影响本地调度，不回写用户配置。
+    """
+    max_interval = int(cfg.get("max_interval_seconds") or 0) or max(base * 4, 3600)
+    ratio = float(cfg.get("quota_low_ratio", 0.5) or 0)
+    if (
+        cfg.get("adaptive_interval", True)
+        and total > 0
+        and ratio > 0
+        and skipped / total >= ratio
+    ):
+        return min(max(current * 2, base * 2), max_interval)
+    if base > 0 and elapsed > current:
+        return min(int(elapsed * 1.2) + 60, max(base * 3, 3600))
+    return base
+
+
 class SyncEngine:
     """后台同步引擎。"""
 
@@ -76,6 +132,8 @@ class SyncEngine:
         self.cfg = load_settings()
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        # 账号 ID -> 上次实际发起同步的 monotonic 时间（用于单账号冷却）
+        self._last_sync: dict[int, float] = {}
         self.progress: dict[str, Any] = {
             "status": "idle",
             "total": 0,
@@ -111,8 +169,6 @@ class SyncEngine:
             self._task = None
 
     async def _run(self) -> None:
-        import time
-
         base = int(self.cfg["interval_seconds"])
         interval = base
         while not self._stop.is_set():
@@ -125,17 +181,29 @@ class SyncEngine:
                 continue
             started = time.monotonic()
             try:
-                await self.sync_all()
+                result = await self.sync_all()
             except Exception as e:  # noqa: BLE001
                 logger.warning("同步周期失败: %s", e)
             elapsed = time.monotonic() - started
             self.progress["duration_seconds"] = round(elapsed, 1)
-            # 自适应间隔：本轮耗时超过间隔时延长下一轮，避免积压
-            if base > 0 and elapsed > interval:
-                interval = min(int(elapsed * 1.2) + 60, max(base * 3, 3600))
-                logger.info("同步耗时 %.0fs 超过间隔，下一轮间隔调整为 %ds", elapsed, interval)
-            else:
-                interval = base
+            # 自适应间隔：本轮多数账号因配额/冷却被跳过时拉长下一轮，
+            # 避免在配额紧张期继续按固定频率空转；否则沿用原有的耗时保护逻辑。
+            total = result.get("total", 0)
+            skipped = result.get("skipped", 0)
+            new_interval = next_interval(
+                base=base,
+                elapsed=elapsed,
+                total=total,
+                skipped=skipped,
+                current=interval,
+                cfg=self.cfg,
+            )
+            if new_interval != interval:
+                logger.info(
+                    "下一轮同步间隔 %ds → %ds（本轮 %d/%d 个账号因配额/冷却跳过，耗时 %.0fs）",
+                    interval, new_interval, skipped, total, elapsed,
+                )
+            interval = new_interval
 
     async def sync_all(self, only_ids: list[int] | None = None) -> dict[str, Any]:
         accounts = config.load_accounts()
@@ -159,6 +227,7 @@ class SyncEngine:
             return_exceptions=True,
         )
         done = sum(1 for r in results if isinstance(r, dict) and r.get("ok"))
+        skipped = sum(1 for r in results if isinstance(r, dict) and r.get("status") in SKIP_STATUSES)
         self.progress.update(
             {
                 "status": "idle",
@@ -168,10 +237,19 @@ class SyncEngine:
                 "current": None,
             }
         )
-        return {"total": len(accounts), "done": done, "failed": len(results) - done}
+        return {
+            "total": len(accounts),
+            "done": done,
+            "failed": len(results) - done,
+            "skipped": skipped,
+        }
 
     async def _guarded(self, sem: asyncio.Semaphore, acc: dict[str, Any]) -> dict[str, Any]:
         async with sem:
+            # 错峰：随机延迟后再发请求，避免同一时刻并发尖峰
+            stagger = float(self.cfg.get("stagger_seconds") or 0)
+            if stagger > 0:
+                await asyncio.sleep(random.uniform(0, stagger))
             self.progress["current"] = acc["username"]
             r = await self.sync_account(acc)
             self.progress["done"] += 1
@@ -195,6 +273,21 @@ class SyncEngine:
                     return {"id": aid, "ok": False, "status": "deferred", "retry_at": nxt}
             except ValueError:
                 pass
+        # 单账号冷却：刚同步过的账号不重复拉取（防止 MCP / 手动在短时间内重复触发）
+        cooldown = float(self.cfg.get("min_sync_interval_seconds") or 0)
+        if cooldown > 0:
+            last = self._last_sync.get(aid)
+            if last is not None:
+                remaining = cooldown - (time.monotonic() - last)
+                if remaining > 0:
+                    return {
+                        "id": aid,
+                        "ok": False,
+                        "status": "throttled",
+                        "reason": "cooldown",
+                        "retry_after": int(remaining) + 1,
+                    }
+        self._last_sync[aid] = time.monotonic()
 
         # 同步前的旧状态（用于事件检测与 304 兜底）
         previous = db.get_summary_dict(aid)

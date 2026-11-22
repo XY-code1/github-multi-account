@@ -68,7 +68,8 @@ config\.secret.key        （本机密钥，必须一起复制）
 - 跨账号待办去重、关系图谱（关注 / 共同仓库 / 共同关注）
 - 账号画像自动聚类（核心 / 活跃 / 沉寂）
 - 出站 Webhook（事件推送到 n8n / Zapier / 自建服务）
-- MCP Server：`GitHub仪表盘.exe --mcp` 以 stdio 暴露工具给 Claude / Cursor（只读：`list_accounts` / `get_todos` / `get_summary` / `get_account_detail` / `sync_account` / `sync_all` / `batch_tag` / `get_audit`；写操作：`star_repo` / `follow_user` / `create_pr`，写前做配额预检并记审计）
+- MCP Server：`GitHub仪表盘.exe --mcp` 以 stdio 暴露工具给 Claude / Cursor（只读：`list_accounts` / `get_todos` / `get_summary` / `get_account_detail` / `sync_account` / `sync_all` / `batch_tag` / `get_audit` / `mcp_status`；写操作：`star_repo` / `follow_user` / `create_pr`）。写操作先做配额预检并记审计；重量工具（`sync_all` / `sync_account` / `create_pr`）走独立令牌桶限流，配置见 `config/settings.yaml` 的 `mcp` 段（热加载）
+- 反风控调度：错峰（同轮随机延迟）、按配额自适应拉长间隔、单账号冷却防重复拉取；统一 `User-Agent: github-multi-account/<版本>`；配置见 `config/settings.yaml` 的 `sync` 段
 - 主题切换、键盘快捷键、变化桌面提醒
 - 版本号显示 + 更新检查
 
