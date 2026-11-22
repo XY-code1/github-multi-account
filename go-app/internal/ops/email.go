@@ -200,6 +200,166 @@ func DeleteEmailMessages(db *sql.DB, accountID *int, ids []int) (int, error) {
 	return int(n), nil
 }
 
+// ------------------------------ 邮箱清单导入（邮笺导出） ------------------------------
+
+// InboxEntry 是一条邮箱清单（邮箱地址 + 取件链接）。
+type InboxEntry struct {
+	Email string `json:"email"`
+	URL   string `json:"url"`
+}
+
+var (
+	inboxEmailRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+	inboxURLRe   = regexp.MustCompile(`https?://[^\s，,；;）)]+`)
+)
+
+// ParseInboxList 解析邮笺导出的邮箱清单（文本 / CSV / JSON）。
+//
+// 文本支持「邮箱 链接」同一行，或邮箱与链接各占相邻两行；
+// JSON 为数组，字段名兼容 email/address/mail 与 url/link/token/inbox。
+func ParseInboxList(raw string) []InboxEntry {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return nil
+	}
+	var list []any
+	if json.Unmarshal([]byte(text), &list) == nil {
+		out := []InboxEntry{}
+		for _, item := range list {
+			switch v := item.(type) {
+			case string:
+				out = append(out, parseInboxLine(v)...)
+			case map[string]any:
+				email := ""
+				for _, k := range []string{"email", "address", "mail"} {
+					if s, ok := v[k].(string); ok && inboxEmailRe.MatchString(s) {
+						email = strings.TrimSpace(s)
+						break
+					}
+				}
+				if email == "" {
+					// name 也作为标识接受（可能是用户名/备注）
+					if s, ok := v["name"].(string); ok && strings.TrimSpace(s) != "" {
+						email = strings.TrimSpace(s)
+					}
+				}
+				url := ""
+				for _, k := range []string{"url", "link", "inbox", "token", "pickup"} {
+					if s, ok := v[k].(string); ok && strings.TrimSpace(s) != "" {
+						url = strings.TrimSpace(s)
+						break
+					}
+				}
+				out = append(out, InboxEntry{Email: email, URL: url})
+			}
+		}
+		return dedupInbox(out)
+	}
+
+	lines := strings.Split(text, "\n")
+	out := []InboxEntry{}
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		emails := inboxEmailRe.FindAllString(line, -1)
+		urls := inboxURLRe.FindAllString(line, -1)
+		if len(emails) > 0 && len(urls) > 0 {
+			out = append(out, InboxEntry{Email: emails[0], URL: urls[0]})
+			continue
+		}
+		if len(emails) > 0 && len(urls) == 0 && i+1 < len(lines) {
+			next := strings.TrimSpace(lines[i+1])
+			nextURLs := inboxURLRe.FindAllString(next, -1)
+			if len(nextURLs) > 0 && inboxEmailRe.FindString(next) == "" {
+				out = append(out, InboxEntry{Email: emails[0], URL: nextURLs[0]})
+				i++
+				continue
+			}
+		}
+		if len(urls) == 0 && i+1 < len(lines) {
+			next := strings.TrimSpace(lines[i+1])
+			nextURLs := inboxURLRe.FindAllString(next, -1)
+			ident := strings.Trim(line, " \t,，;；:：-—")
+			if len(nextURLs) > 0 && !strings.Contains(line, "http") && ident != "" {
+				out = append(out, InboxEntry{Email: ident, URL: nextURLs[0]})
+				i++
+				continue
+			}
+		}
+		out = append(out, parseInboxLine(line)...)
+	}
+	return dedupInbox(out)
+}
+
+func parseInboxLine(line string) []InboxEntry {
+	emails := inboxEmailRe.FindAllString(line, -1)
+	urls := inboxURLRe.FindAllString(line, -1)
+	if len(emails) > 0 && len(urls) > 0 {
+		return []InboxEntry{{Email: emails[0], URL: urls[0]}}
+	}
+	if len(urls) > 0 {
+		return []InboxEntry{{Email: lineIdentifier(line, urls[0]), URL: urls[0]}}
+	}
+	return nil
+}
+
+// lineIdentifier 取链接前的文本作为标识（可能是邮箱地址，也可能是用户名/备注）。
+func lineIdentifier(line, url string) string {
+	idx := strings.Index(line, url)
+	if idx < 0 {
+		return ""
+	}
+	return strings.Trim(line[:idx], " \t,，;；:：-—")
+}
+
+func dedupInbox(items []InboxEntry) []InboxEntry {
+	seen := map[string]bool{}
+	out := []InboxEntry{}
+	for _, it := range items {
+		if it.Email == "" && it.URL == "" {
+			continue
+		}
+		key := strings.ToLower(it.Email) + "|" + it.URL
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, it)
+	}
+	return out
+}
+
+// MatchInboxAccount 按邮箱地址 / 邮箱名 / 用户名匹配现有账号，返回 (账号 ID, 用户名)。
+func MatchInboxAccount(emailAddr string, accounts []config.Account) (int, string) {
+	emailAddr = strings.TrimSpace(emailAddr)
+	if emailAddr == "" {
+		return 0, ""
+	}
+	lowered := strings.ToLower(emailAddr)
+	local := emailAddr
+	if i := strings.Index(emailAddr, "@"); i > 0 {
+		local = emailAddr[:i]
+	}
+	for _, a := range accounts {
+		if strings.ToLower(a.Email) == lowered {
+			return a.ID, a.Username
+		}
+	}
+	for _, a := range accounts {
+		if strings.ToLower(a.Username) == lowered {
+			return a.ID, a.Username
+		}
+	}
+	for _, a := range accounts {
+		if local != "" && strings.ToLower(a.Username) == strings.ToLower(local) {
+			return a.ID, a.Username
+		}
+	}
+	return 0, ""
+}
+
 // AsInt 把 YAML/JSON 里的数值转成 int（供 server 层复用）。
 func AsInt(v any) (int, bool) { return asInt(v) }
 

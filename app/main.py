@@ -832,6 +832,10 @@ class EmailImportIn(BaseModel):
     messages: list[dict[str, Any]] = []
 
 
+class EmailInboxImportIn(BaseModel):
+    items: list[dict[str, Any]] = []
+
+
 def _email_code(text: str) -> str | None:
     cfg = email.load_settings()
     return email.extract_code(
@@ -935,6 +939,51 @@ async def email_delete(payload: dict[str, Any]) -> dict[str, Any]:
     )
     db.audit("email.delete", detail=f"删除邮件 {deleted} 封")
     return {"ok": True, "deleted": deleted}
+
+
+@app.post("/api/email/inboxes/parse")
+async def email_inboxes_parse(payload: dict[str, Any]) -> dict[str, Any]:
+    """解析邮笺导出的邮箱清单（邮箱 + 取件链接），并匹配现有账号。"""
+    raw = str(payload.get("text") or "")
+    accounts = config.load_accounts()
+    items = []
+    for c in email.parse_inbox_list(raw):
+        acc = email.match_inbox_account(c["email"], accounts)
+        items.append({
+            "email": c["email"],
+            "url": c["url"],
+            "accountId": acc["id"] if acc else None,
+            "accountUsername": acc["username"] if acc else "",
+        })
+    return {
+        "candidates": items,
+        "accounts": [
+            {
+                "id": a["id"],
+                "username": a.get("username", ""),
+                "label": a.get("label") or a.get("username", ""),
+                "email": a.get("email", ""),
+            }
+            for a in accounts
+        ],
+    }
+
+
+@app.post("/api/email/inboxes/import")
+async def email_inboxes_import(payload: EmailInboxImportIn) -> dict[str, Any]:
+    """把邮箱清单按账号回填（只更新账号的关联邮箱字段）。"""
+    updated = 0
+    for item in payload.items:
+        if not isinstance(item, dict):
+            continue
+        acc_id = item.get("accountId")
+        url = str(item.get("url") or "").strip()
+        if not acc_id or not url:
+            continue
+        if config.set_account_email(int(acc_id), url) is not None:
+            updated += 1
+    db.audit("email.inboxes.import", detail=f"导入邮箱清单：关联 {updated} 个账号")
+    return {"ok": True, "updated": updated}
 
 
 # ------------------------------ 前端页面 ------------------------------

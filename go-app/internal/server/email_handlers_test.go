@@ -56,3 +56,26 @@ func TestEmailRefreshDisabled(t *testing.T) {
 		t.Fatalf("未启用时应返回 ok=false: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestEmailInboxImportFlow(t *testing.T) {
+	h, cfg, _ := newTestEnv(t)
+	if _, err := cfg.Add(config.Account{Label: "Alice", Username: "alice", Token: "t"}); err != nil {
+		t.Fatalf("建账号失败: %v", err)
+	}
+
+	w := do(h, http.MethodPost, "/api/email/inboxes/parse",
+		`{"text":"alice https://inbox.123456.world/i/tok/json"}`, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accountUsername":"alice"`) {
+		t.Fatalf("解析/匹配失败: %d %s", w.Code, w.Body.String())
+	}
+
+	w = do(h, http.MethodPost, "/api/email/inboxes/import",
+		`{"items":[{"accountId":1,"url":"https://inbox.123456.world/i/tok/json"}]}`, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"updated":1`) {
+		t.Fatalf("导入失败: %d %s", w.Code, w.Body.String())
+	}
+	accounts, _ := cfg.Accounts()
+	if len(accounts) != 1 || accounts[0].Email != "https://inbox.123456.world/i/tok/json" {
+		t.Fatalf("关联邮箱未回填: %+v", accounts)
+	}
+}

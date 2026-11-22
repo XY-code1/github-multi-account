@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github-multi-account/internal/config"
 	"github-multi-account/internal/store"
 )
 
@@ -195,5 +196,54 @@ func TestEmailConfigRoundtrip(t *testing.T) {
 	got := LoadEmailConfig(dir)
 	if !got.Enabled || got.APIBase != cfg.APIBase || got.SiteURL != cfg.SiteURL {
 		t.Fatalf("配置回读不一致: %+v", got)
+	}
+}
+
+func TestParseInboxList(t *testing.T) {
+	raw := "alice https://inbox.123456.world/i/tok-a/json\n" +
+		"bob@x.com\nhttps://inbox.123456.world/i/tok-b/json\n" +
+		"alice https://inbox.123456.world/i/tok-a/json\n" + // 重复，应去重
+		"https://inbox.123456.world/i/tok-c/json" // 仅链接
+	items := ParseInboxList(raw)
+	if len(items) != 3 {
+		t.Fatalf("应解析出 3 条（去重后），得到 %d: %+v", len(items), items)
+	}
+	if items[0].Email != "alice" || items[0].URL == "" {
+		t.Fatalf("同行解析不正确: %+v", items[0])
+	}
+	if items[1].Email != "bob@x.com" {
+		t.Fatalf("相邻两行解析不正确: %+v", items[1])
+	}
+	if items[2].Email != "" {
+		t.Fatalf("仅链接应无标识: %+v", items[2])
+	}
+}
+
+func TestParseInboxListJSON(t *testing.T) {
+	items := ParseInboxList(`[{"email":"a@b.com","url":"https://x/1"},{"name":"carol","token":"tok"}]`)
+	if len(items) != 2 {
+		t.Fatalf("JSON 解析数量不正确: %d", len(items))
+	}
+	if items[1].Email != "carol" || items[1].URL != "tok" {
+		t.Fatalf("name/token 别名解析不正确: %+v", items[1])
+	}
+}
+
+func TestMatchInboxAccount(t *testing.T) {
+	accounts := []config.Account{
+		{ID: 1, Username: "alice", Email: "a@b.com"},
+		{ID: 2, Username: "bob"},
+	}
+	if id, name := MatchInboxAccount("a@b.com", accounts); id != 1 || name != "alice" {
+		t.Fatalf("按邮箱匹配失败: %d %s", id, name)
+	}
+	if id, _ := MatchInboxAccount("bob", accounts); id != 2 {
+		t.Fatalf("按标识匹配用户名失败: %d", id)
+	}
+	if id, _ := MatchInboxAccount("bob@x.com", accounts); id != 2 {
+		t.Fatalf("按邮箱名匹配用户名失败: %d", id)
+	}
+	if id, _ := MatchInboxAccount("nobody@x.com", accounts); id != 0 {
+		t.Fatalf("未匹配应返回 0: %d", id)
 	}
 }

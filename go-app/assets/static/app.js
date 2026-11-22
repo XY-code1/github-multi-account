@@ -1098,6 +1098,87 @@ function importEmailFile() {
   input.click();
 }
 
+// ---------------- 导入邮箱清单（邮笺导出） ----------------
+
+async function openEmailInboxImport() {
+  document.getElementById("emailInboxText").value = "";
+  document.getElementById("emailInboxPreview").innerHTML = "";
+  document.getElementById("emailInboxFile").value = "";
+  document.getElementById("emailInboxDoImportBtn").disabled = true;
+  document.getElementById("emailInboxModal").classList.remove("hidden");
+}
+
+function handleEmailInboxFile(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  file.text().then((text) => {
+    document.getElementById("emailInboxText").value = text;
+    parseEmailInboxes();
+  }).catch((err) => showToast("读取文件失败：" + err.message));
+}
+
+async function parseEmailInboxes() {
+  const text = document.getElementById("emailInboxText").value;
+  const preview = document.getElementById("emailInboxPreview");
+  if (!text.trim()) {
+    preview.innerHTML = `<div class="empty-tab">请粘贴文本或选择文件</div>`;
+    return;
+  }
+  try {
+    const data = await api("/api/email/inboxes/parse", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    const rows = data.candidates || [];
+    state.email.inboxCandidates = rows;
+    if (!rows.length) {
+      preview.innerHTML = `<div class="empty-tab">未解析到邮箱，请检查格式</div>`;
+      document.getElementById("emailInboxDoImportBtn").disabled = true;
+      return;
+    }
+    const matched = rows.filter((r) => r.accountId).length;
+    preview.innerHTML = `<table class="mail-table"><thead><tr>
+      <th></th><th>邮箱</th><th>取件链接</th><th>匹配账号</th></tr></thead><tbody>
+      ${rows.map((c, i) => `<tr class="${c.accountId ? "" : "row-invalid"}">
+        <td class="col-check"><input type="checkbox" data-inbox="${i}" ${c.accountId ? "checked" : ""}></td>
+        <td>${escapeHtml(c.email || "-")}</td>
+        <td class="cell-sub">${escapeHtml(c.url || "-")}</td>
+        <td>${c.accountId ? escapeHtml(c.accountUsername) : '<span class="tag is-warning">未匹配</span>'}</td>
+      </tr>`).join("")}</tbody></table>
+      <p class="page-desc">已匹配 ${matched} / ${rows.length} 条；未匹配的默认不勾选（可先在账号上填写同名用户名或邮箱）。</p>`;
+    preview.querySelectorAll("[data-inbox]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const any = preview.querySelectorAll("[data-inbox]:checked").length;
+        document.getElementById("emailInboxDoImportBtn").disabled = !any;
+      });
+    });
+    document.getElementById("emailInboxDoImportBtn").disabled = !matched;
+  } catch (e) {
+    preview.innerHTML = `<div class="empty-tab">解析失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function importEmailInboxes() {
+  const preview = document.getElementById("emailInboxPreview");
+  const idxs = Array.from(preview.querySelectorAll("[data-inbox]:checked"))
+    .map((cb) => Number(cb.dataset.inbox));
+  const items = idxs.map((i) => state.email.inboxCandidates[i]).filter(Boolean)
+    .map((c) => ({ accountId: c.accountId, url: c.url }));
+  if (!items.length) return;
+  try {
+    const res = await api("/api/email/inboxes/import", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    });
+    showToast(`已导入：关联 ${res.updated} 个账号`);
+    document.getElementById("emailInboxModal").classList.add("hidden");
+    await loadEmail();
+    try { await loadAccountsPage(false); } catch (e) { /* 列表页未加载时忽略 */ }
+  } catch (e) {
+    showToast("导入失败：" + e.message);
+  }
+}
+
 function openEmailSettings() {
   const s = state.email.settings || {};
   document.getElementById("emailEnabled").checked = !!s.enabled;
@@ -1939,6 +2020,13 @@ function bindEvents() {
 
   document.getElementById("emailRefreshBtn").addEventListener("click", refreshEmail);
   document.getElementById("emailImportBtn").addEventListener("click", importEmailFile);
+  document.getElementById("emailInboxImportBtn").addEventListener("click", openEmailInboxImport);
+  document.getElementById("emailInboxFileBtn").addEventListener("click", () => document.getElementById("emailInboxFile").click());
+  document.getElementById("emailInboxFile").addEventListener("change", handleEmailInboxFile);
+  document.getElementById("emailInboxParseBtn").addEventListener("click", parseEmailInboxes);
+  document.getElementById("emailInboxClose").addEventListener("click", () => document.getElementById("emailInboxModal").classList.add("hidden"));
+  document.getElementById("emailInboxDoImportBtn").addEventListener("click", importEmailInboxes);
+  document.getElementById("emailInboxModal").addEventListener("click", (e) => { if (e.target.id === "emailInboxModal") document.getElementById("emailInboxModal").classList.add("hidden"); });
   document.getElementById("emailSettingsBtn").addEventListener("click", openEmailSettings);
   document.getElementById("emailSettingsClose").addEventListener("click", () => document.getElementById("emailModal").classList.add("hidden"));
   document.getElementById("emailSettingsSave").addEventListener("click", saveEmailSettings);

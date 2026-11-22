@@ -107,6 +107,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/email/import", s.handleEmailImport)
 	s.mux.HandleFunc("POST /api/email/refresh", s.handleEmailRefresh)
 	s.mux.HandleFunc("DELETE /api/email/messages", s.handleEmailDelete)
+	s.mux.HandleFunc("POST /api/email/inboxes/parse", s.handleEmailInboxesParse)
+	s.mux.HandleFunc("POST /api/email/inboxes/import", s.handleEmailInboxesImport)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	s.mux.HandleFunc("POST /api/sync/settings", s.handleSyncSettings)
 	s.mux.HandleFunc("POST /api/sync/run", s.handleSyncRun)

@@ -459,6 +459,13 @@ a:hover { text-decoration: underline; }
 }
 .cell-email { color: var(--text-faint); }
 
+/* 邮箱清单导入预览表 */
+.mail-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+.mail-table th, .mail-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.mail-table th { color: var(--text-muted); font-weight: 600; font-size: 12px; }
+.mail-table td.cell-sub { word-break: break-all; }
+.mail-table tr.row-invalid { opacity: 0.7; }
+
 /* ---------------- 布局 ---------------- */
 
 .layout {

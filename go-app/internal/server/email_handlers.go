@@ -241,6 +241,62 @@ func (s *Server) handleEmailDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
 }
 
+// handleEmailInboxesParse 解析邮笺导出的邮箱清单，并匹配现有账号。
+func (s *Server) handleEmailInboxesParse(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请求格式不正确"})
+		return
+	}
+	accounts, err := s.cfg.Accounts()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	items := []map[string]any{}
+	for _, c := range ops.ParseInboxList(in.Text) {
+		id, username := ops.MatchInboxAccount(c.Email, accounts)
+		items = append(items, map[string]any{
+			"email": c.Email, "url": c.URL,
+			"accountId": id, "accountUsername": username,
+		})
+	}
+	list := []map[string]any{}
+	for _, a := range accounts {
+		list = append(list, map[string]any{
+			"id": a.ID, "username": a.Username, "label": a.Label, "email": a.Email,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": items, "accounts": list})
+}
+
+// handleEmailInboxesImport 把邮箱清单按账号回填（只更新关联邮箱字段）。
+func (s *Server) handleEmailInboxesImport(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "请求格式不正确"})
+		return
+	}
+	updated := 0
+	for _, item := range in.Items {
+		id, _ := item["accountId"].(float64)
+		url := strOf(item, "url")
+		if int(id) == 0 || url == "" {
+			continue
+		}
+		if err := s.cfg.SetEmail(int(id), url); err == nil {
+			updated++
+		}
+	}
+	ops.Audit(s.opsDB, "email.inboxes.import", nil, "",
+		"导入邮箱清单：关联 "+strconv.Itoa(updated)+" 个账号")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updated})
+}
+
 func intParam(raw string, def int) int {
 	if raw == "" {
 		return def

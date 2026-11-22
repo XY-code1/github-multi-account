@@ -132,32 +132,56 @@ def test_email_import_list_filter_and_code():
         assert filtered["total"] == 0
 
 
-def test_email_settings_api():
+def test_email_api_flow():
+    """一个会话内跑完邮箱 API：设置 / 刷新保护 / 邮件导入删除 / 邮箱清单导入。"""
     with TestClient(app) as client:
-        resp = client.post("/api/email/settings", json={"enabled": True, "site_url": "https://inbox.123456.world"})
+        # 设置保存与读取
+        resp = client.post(
+            "/api/email/settings",
+            json={"enabled": False, "site_url": "https://inbox.123456.world"},
+        )
         assert resp.status_code == 200
         got = client.get("/api/email/settings").json()
-        assert got["settings"]["enabled"] is True
+        assert got["settings"]["enabled"] is False
         assert got["settings"]["site_url"] == "https://inbox.123456.world"
 
+        # 未启用时刷新被拦截
+        res = client.post("/api/email/refresh").json()
+        assert res["ok"] is False and res["reason"] == "disabled"
 
-def test_email_refresh_requires_enabled():
-    with TestClient(app) as client:
-        resp = client.post("/api/email/refresh")
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is False
-        assert resp.json()["reason"] == "disabled"
-
-
-def test_email_delete():
-    with TestClient(app) as client:
-        client.post("/api/email/import", json={"messages": [
-            {"email": "x@y", "subject": "s", "body": "b", "messageId": "d1"}
-        ]})
+        # 邮件导入 / 列表 / 删除
+        imported = client.post(
+            "/api/email/import",
+            json={"messages": [{"email": "x@y", "subject": "s", "body": "b", "messageId": "d1"}]},
+        ).json()
+        assert imported["added"] == 1
         items = client.get("/api/email/messages").json()["items"]
-        resp = client.request("DELETE", "/api/email/messages", json={"ids": [items[0]["id"]]})
-        assert resp.status_code == 200
-        assert resp.json()["deleted"] == 1
+        assert len(items) == 1
+        deleted = client.request(
+            "DELETE", "/api/email/messages", json={"ids": [items[0]["id"]]}
+        ).json()
+        assert deleted["deleted"] == 1
+
+        # 邮箱清单解析 + 回填账号
+        config.add_account("Alice", "alice", "ghp_x", email="")
+        config.add_account("Bob", "bob", "ghp_y")
+        text = (
+            "alice https://inbox.123456.world/i/tok-a/json\n"
+            "bob@x.com https://inbox.123456.world/i/tok-b/json"
+        )
+        parsed = client.post("/api/email/inboxes/parse", json={"text": text}).json()
+        candidates = {c["email"]: c for c in parsed["candidates"]}
+        assert candidates["alice"]["accountId"] == 1
+        assert candidates["bob@x.com"]["accountId"] == 2
+
+        picked = [c for c in parsed["candidates"] if c["accountId"]]
+        imported_acc = client.post(
+            "/api/email/inboxes/import", json={"items": picked}
+        ).json()
+        assert imported_acc["updated"] == 2
+        accounts = {a["username"]: a for a in config.load_accounts()}
+        assert accounts["alice"]["email"].endswith("/i/tok-a/json")
+        assert accounts["bob"]["email"].endswith("/i/tok-b/json")
 
 
 def test_db_message_dedup_and_account_filter():
@@ -191,6 +215,50 @@ def test_export_hides_email_without_credentials():
     config.import_backup(full)
     acc = next(a for a in config.load_accounts() if a["username"] == "exp-u")
     assert acc["email"] == "token-secret"
+
+
+def test_parse_inbox_list_same_line():
+    items = email.parse_inbox_list(
+        "abc@icloud.com https://inbox.123456.world/i/tok1/json\n"
+        "zzz@x.com https://inbox.123456.world/i/tok2/json"
+    )
+    assert len(items) == 2
+    assert items[0]["email"] == "abc@icloud.com"
+    assert items[0]["url"].endswith("/tok1/json")
+
+
+def test_parse_inbox_list_adjacent_lines():
+    items = email.parse_inbox_list(
+        "abc@icloud.com\nhttps://inbox.123456.world/i/tok/json\n"
+    )
+    assert len(items) == 1
+    assert items[0]["email"] == "abc@icloud.com"
+    assert items[0]["url"].endswith("/json")
+
+
+def test_parse_inbox_list_json_and_dedup():
+    items = email.parse_inbox_list(
+        '[{"email":"a@b.com","url":"https://x/i/1/json"},'
+        '{"address":"c@d.com","token":"tok2"}]'
+    )
+    assert len(items) == 2
+    assert items[1]["url"] == "tok2"
+    dedup = email.parse_inbox_list(
+        "a@b.com https://x/1\na@b.com https://x/1\nhttps://x/2/json"
+    )
+    assert len(dedup) == 2
+    assert dedup[-1]["email"] == ""
+
+
+def test_match_inbox_account():
+    accounts = [
+        {"id": 1, "username": "alice", "email": "a@b.com"},
+        {"id": 2, "username": "bob", "email": ""},
+    ]
+    assert email.match_inbox_account("a@b.com", accounts)["id"] == 1
+    assert email.match_inbox_account("bob", accounts)["id"] == 2
+    assert email.match_inbox_account("bob@x.com", accounts)["id"] == 2
+    assert email.match_inbox_account("nobody@x.com", accounts) is None
 
 
 def test_fetch_account_mail_paginates_and_extracts_code(monkeypatch):

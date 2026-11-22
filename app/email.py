@@ -212,6 +212,139 @@ def parse_messages(payload: Any, account_email: str) -> list[dict[str, Any]]:
     return out
 
 
+# ------------------------------ 邮箱清单导入（邮笺导出） ------------------------------
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+URL_RE = re.compile(r"https?://[^\s，,；;）)]+")
+
+
+def _dedup_inboxes(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+    for it in items:
+        email = (it.get("email") or "").strip()
+        url = (it.get("url") or "").strip()
+        if not email and not url:
+            continue
+        key = (email.lower(), url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"email": email, "url": url})
+    return out
+
+
+def _line_identifier(line: str, url: str) -> str:
+    """取链接前的文本作为标识（可能是邮箱地址，也可能是用户名/备注）。"""
+    idx = line.find(url)
+    head = line[:idx].strip(" \t,，;；:：-—")
+    return head if head else ""
+
+
+def _parse_inbox_line(line: str) -> list[dict[str, str]]:
+    emails = EMAIL_RE.findall(line)
+    urls = URL_RE.findall(line)
+    if emails and urls:
+        return [{"email": emails[0], "url": urls[0]}]
+    if urls:
+        return [{"email": _line_identifier(line, urls[0]), "url": urls[0]}]
+    return []
+
+
+def parse_inbox_list(raw: str) -> list[dict[str, str]]:
+    """解析邮笺导出的邮箱清单（邮箱 + 取件链接）。
+
+    支持：
+    - 纯文本 / CSV：`邮箱 链接` 同一行，或邮箱与链接各占相邻两行；
+    - JSON：数组（元素为对象，字段名兼容 email/address/mail 与 url/link/token/inbox），
+      或元素为字符串（按文本行解析）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001
+        data = None
+    if isinstance(data, list):
+        out: list[dict[str, str]] = []
+        for item in data:
+            if isinstance(item, str):
+                out.extend(_parse_inbox_line(item))
+                continue
+            if not isinstance(item, dict):
+                continue
+            email = ""
+            for key in ("email", "address", "mail"):
+                value = item.get(key)
+                if isinstance(value, str) and EMAIL_RE.fullmatch(value.strip()):
+                    email = value.strip()
+                    break
+            if not email:
+                # name 也作为标识接受（可能是用户名/备注）
+                value = item.get("name")
+                if isinstance(value, str) and value.strip():
+                    email = value.strip()
+            url = ""
+            for key in ("url", "link", "inbox", "token", "pickup"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    url = value.strip()
+                    break
+            out.append({"email": email, "url": url})
+        return _dedup_inboxes(out)
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        emails = EMAIL_RE.findall(line)
+        urls = URL_RE.findall(line)
+        if emails and urls:
+            out.append({"email": emails[0], "url": urls[0]})
+            i += 1
+            continue
+        if emails and not urls and i + 1 < len(lines):
+            nxt = lines[i + 1]
+            next_urls = URL_RE.findall(nxt)
+            if next_urls and not EMAIL_RE.search(nxt):
+                out.append({"email": emails[0], "url": next_urls[0]})
+                i += 2
+                continue
+        if not urls and i + 1 < len(lines):
+            nxt = lines[i + 1]
+            next_urls = URL_RE.findall(nxt)
+            if next_urls and not URL_RE.search(line) and line.strip(" \t,，;；:：-—"):
+                out.append({"email": line.strip(" \t,，;；:：-—"), "url": next_urls[0]})
+                i += 2
+                continue
+        out.extend(_parse_inbox_line(line))
+        i += 1
+    return _dedup_inboxes(out)
+
+
+def match_inbox_account(
+    email_addr: str, accounts: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """按邮箱地址 / 邮箱名 / 用户名匹配现有账号（用于回填关联邮箱）。"""
+    email_addr = (email_addr or "").strip()
+    if not email_addr:
+        return None
+    local = email_addr.split("@", 1)[0]
+    lowered = email_addr.lower()
+    for a in accounts:
+        if (a.get("email") or "").lower() == lowered:
+            return a
+    for a in accounts:
+        if (a.get("username") or "").lower() == lowered:
+            return a
+    for a in accounts:
+        if local and (a.get("username") or "").lower() == local.lower():
+            return a
+    return None
+
+
 async def fetch_account_mail(
     account: dict[str, Any], cfg: dict[str, Any] | None = None
 ) -> dict[str, Any]:

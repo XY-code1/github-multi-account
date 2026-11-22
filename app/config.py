@@ -212,6 +212,17 @@ def add_account(
     return accounts[-1]
 
 
+def set_account_email(account_id: int, email_value: str) -> dict[str, Any] | None:
+    """回填账号的关联邮箱（保留其他字段）。"""
+    accounts = load_accounts()
+    for acc in accounts:
+        if acc["id"] == account_id:
+            acc["email"] = (email_value or "").strip()
+            save_accounts(accounts)
+            return acc
+    return None
+
+
 def delete_account(account_id: int) -> bool:
     accounts = load_accounts()
     new_accounts = [a for a in accounts if a["id"] != account_id]

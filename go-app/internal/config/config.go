@@ -272,6 +272,26 @@ func (s *Store) writeLocked(accounts []Account) error {
 	return nil
 }
 
+// SetEmail 更新账号的关联邮箱（保留其他字段）。
+func (s *Store) SetEmail(id int, emailAddr string) error {
+	accounts, err := s.Accounts()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range accounts {
+		if accounts[i].ID == id {
+			accounts[i].Email = emailAddr
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("账号不存在")
+	}
+	return s.Save(accounts)
+}
+
 // Save 全量写回。
 func (s *Store) Save(accounts []Account) error {
 	s.mu.Lock()
