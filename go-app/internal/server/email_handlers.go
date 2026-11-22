@@ -86,7 +86,10 @@ func (s *Server) handleEmailMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg := ops.LoadEmailConfig(emailConfigDir(s))
-	items, err := ops.ListEmailMessages(s.opsDB, accountID, q.Get("q"), intParam(q.Get("limit"), 100), inboxID)
+	items, err := ops.ListEmailMessages(
+		s.opsDB, accountID, q.Get("q"), intParam(q.Get("limit"), 100), inboxID,
+		q.Get("sort"), q.Get("hasCode") == "1" || q.Get("hasCode") == "true",
+	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return

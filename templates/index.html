@@ -296,21 +296,33 @@
       <section id="page-email" class="page">
         <div class="page-head">
           <h2>邮箱</h2>
-          <p class="page-desc" id="emailDesc">查看账号关联邮箱的通知、安全邮件与验证码（仅展示，不会自动填充到任何网站）</p>
+          <p class="page-desc" id="emailDesc">查看邮箱的通知、安全邮件与验证码（仅展示，不会自动填充到任何网站）</p>
         </div>
-        <div class="panel">
-          <div class="panel-head">
-            <h3>邮件</h3>
-            <div class="chip-row">
-              <select id="emailAccount" class="select-sm"><option value="">全部邮箱</option></select>
-              <input id="emailSearch" class="input-sm" type="text" placeholder="搜索主题 / 正文 / 发件人">
-              <button id="emailRefreshBtn" class="btn btn-sm">刷新邮件</button>
-              <button id="emailImportBtn" class="btn btn-sm">导入 JSON</button>
-              <button id="emailInboxImportBtn" class="btn btn-sm">导入邮箱</button>
-              <button id="emailSettingsBtn" class="btn btn-sm">邮箱设置</button>
-            </div>
-          </div>
-          <div id="emailList"></div>
+        <div class="toolbar">
+          <input id="emailSearch" class="input-sm" type="text" placeholder="搜索邮件主题 / 正文 / 发件人">
+          <select id="emailSort" class="select-sm">
+            <option value="time">最新优先</option>
+            <option value="code">验证码优先</option>
+          </select>
+          <select id="emailFilter" class="select-sm">
+            <option value="all">全部邮件</option>
+            <option value="code">仅验证码</option>
+          </select>
+          <span class="spacer"></span>
+          <button id="emailRefreshBtn" class="btn btn-sm">刷新邮件</button>
+          <button id="emailInboxImportBtn" class="btn btn-sm">导入邮箱</button>
+          <button id="emailImportBtn" class="btn btn-sm">导入 JSON</button>
+          <button id="emailSettingsBtn" class="btn btn-sm">邮箱设置</button>
+        </div>
+        <div class="mail-layout">
+          <aside class="mail-sidebar">
+            <input id="emailMailboxSearch" class="input-sm" type="text" placeholder="搜索邮箱">
+            <div id="mailboxList" class="mailbox-list"></div>
+          </aside>
+          <section class="mail-main">
+            <div id="mailHero" class="mail-hero"></div>
+            <div id="mailList" class="mail-list"></div>
+          </section>
         </div>
       </section>
 

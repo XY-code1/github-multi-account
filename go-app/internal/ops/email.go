@@ -128,8 +128,8 @@ func AddEmailMessage(
 	return true, nil
 }
 
-// ListEmailMessages 列出本地缓存邮件（可按账号 / 独立邮箱 / 关键字筛选）。
-func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int, inboxID *int) ([]EmailMessage, error) {
+// ListEmailMessages 列出本地缓存邮件（可按账号 / 独立邮箱 / 关键字筛选，支持验证码优先排序）。
+func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int, inboxID *int, sort string, hasCode bool) ([]EmailMessage, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -146,6 +146,9 @@ func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int, inboxID 
 		cond = append(cond, "inbox_id=?")
 		args = append(args, *inboxID)
 	}
+	if hasCode {
+		cond = append(cond, "(code IS NOT NULL AND code<>'')")
+	}
 	if q != "" {
 		cond = append(cond, "(subject LIKE ? OR body LIKE ? OR sender LIKE ? OR email LIKE ?)")
 		like := "%" + q + "%"
@@ -155,7 +158,11 @@ func ListEmailMessages(db *sql.DB, accountID *int, q string, limit int, inboxID 
 	if len(cond) > 0 {
 		query += " WHERE " + strings.Join(cond, " AND ")
 	}
-	query += " ORDER BY datetime(received_at) DESC, id DESC LIMIT ?"
+	if sort == "code" {
+		query += " ORDER BY (CASE WHEN code IS NOT NULL AND code<>'' THEN 0 ELSE 1 END), datetime(received_at) DESC, id DESC LIMIT ?"
+	} else {
+		query += " ORDER BY datetime(received_at) DESC, id DESC LIMIT ?"
+	}
 	args = append(args, limit)
 
 	rows, err := db.Query(query, args...)

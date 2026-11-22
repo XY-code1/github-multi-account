@@ -300,6 +300,17 @@ def test_inbox_crud():
     assert db.delete_inbox(inbox_id) is False
 
 
+def test_list_messages_sort_and_has_code():
+    db.add_email_message(account_id=1, email="a@b", message_id="m1", sender="s",
+                         subject="no", body="b", received_at="")
+    db.add_email_message(account_id=1, email="a@b", message_id="m2", sender="s",
+                         subject="yes", body="c", received_at="", code="4321")
+    code_first = db.list_email_messages(account_id=1, sort="code")
+    assert code_first[0]["code"] == "4321"
+    only = db.list_email_messages(account_id=1, has_code=True)
+    assert len(only) == 1 and only[0]["code"] == "4321"
+
+
 def test_match_inbox_account():
     accounts = [
         {"id": 1, "username": "alice", "email": "a@b.com"},

@@ -110,7 +110,10 @@ const state = {
   version: null,
   webhooks: [],
   webhookTypes: [],
-  email: { settings: null, accounts: [], inboxes: [], items: [], filter: "", q: "" },
+  email: {
+    settings: null, accounts: [], inboxes: [], selected: "",
+    items: [], detailId: null, q: "", sort: "time", filter: "all", mailboxQ: "",
+  },
 };
 
 // ---------------- 路由 ----------------
@@ -968,48 +971,135 @@ async function loadAutomation() {
 
 // ---------------- 邮箱 ----------------
 
+function mailKeyInfo(key) {
+  if (!key) return null;
+  if (key.startsWith("inbox:")) {
+    const id = Number(key.slice(6));
+    const b = (state.email.inboxes || []).find((x) => x.id === id);
+    return b
+      ? { kind: "inbox", id, label: b.email || b.url, email: b.email || "", url: b.url }
+      : null;
+  }
+  const id = Number(key);
+  const a = (state.email.accounts || []).find((x) => x.id === id);
+  return a
+    ? { kind: "account", id, label: a.label || a.username, email: a.email || "", username: a.username }
+    : null;
+}
+
 async function loadEmail() {
   try {
-    const q = state.email.q ? `&q=${encodeURIComponent(state.email.q)}` : "";
-    const filter = state.email.filter || "";
-    let msgQuery = `/api/email/messages?limit=200${q}`;
-    if (filter.startsWith("inbox:")) {
-      msgQuery += `&inboxId=${encodeURIComponent(filter.slice(6))}`;
-    } else if (filter) {
-      msgQuery += `&accountId=${encodeURIComponent(filter)}`;
-    }
-    const [settingsResp, messagesResp, inboxesResp] = await Promise.all([
+    const [settingsResp, inboxesResp] = await Promise.all([
       api("/api/email/settings"),
-      api(msgQuery),
       api("/api/email/inboxes"),
     ]);
     state.email.settings = settingsResp.settings || {};
     state.email.accounts = settingsResp.accounts || [];
     state.email.inboxes = inboxesResp.items || [];
-    state.email.items = messagesResp.items || [];
-    renderEmailAccounts();
-    renderEmailList();
+    if (!state.email.selected) {
+      const firstAcc = (state.email.accounts || []).find((a) => a.email);
+      const firstInbox = (state.email.inboxes || [])[0];
+      state.email.selected = firstAcc
+        ? `account:${firstAcc.id}`
+        : firstInbox
+          ? `inbox:${firstInbox.id}`
+          : "";
+    }
+    renderMailboxList();
+    await loadMessages();
   } catch (e) {
-    document.getElementById("emailList").innerHTML =
+    document.getElementById("mailList").innerHTML =
       `<div class="empty-tab">加载失败：${escapeHtml(e.message)}</div>`;
   }
 }
 
-function renderEmailAccounts() {
-  const sel = document.getElementById("emailAccount");
-  const cur = state.email.filter || "";
-  const withEmail = (state.email.accounts || []).filter((a) => a.email);
-  const inboxes = state.email.inboxes || [];
-  const opt = (value, label) =>
-    `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
-  sel.innerHTML = `<option value="">全部邮箱（${withEmail.length + inboxes.length}）</option>` +
-    withEmail.map((a) => opt(a.id, `${a.label || a.username} · ${a.email}`)).join("") +
-    (inboxes.length
-      ? `<optgroup label="独立邮箱">${inboxes
-          .map((b) => opt(`inbox:${b.id}`, `${b.email || b.url}`))
-          .join("")}</optgroup>`
-      : "");
-  sel.value = cur;
+async function loadMessages() {
+  const info = mailKeyInfo(state.email.selected);
+  if (!info) {
+    state.email.items = [];
+    state.email.detailId = null;
+    renderMailHero();
+    renderMailList();
+    return;
+  }
+  try {
+    const q = state.email.q ? `&q=${encodeURIComponent(state.email.q)}` : "";
+    const sort = state.email.sort === "code" ? "&sort=code" : "";
+    const hasCode = state.email.filter === "code" ? "&hasCode=1" : "";
+    const idParam = info.kind === "inbox" ? `inboxId=${info.id}` : `accountId=${info.id}`;
+    const resp = await api(`/api/email/messages?limit=200&${idParam}${q}${sort}${hasCode}`);
+    state.email.items = resp.items || [];
+  } catch (e) {
+    state.email.items = [];
+    showToast(e.message);
+  }
+  state.email.detailId = null;
+  renderMailHero();
+  renderMailList();
+}
+
+function renderMailboxList() {
+  const box = document.getElementById("mailboxList");
+  const kw = (state.email.mailboxQ || "").trim().toLowerCase();
+  const match = (label, email) =>
+    !kw ||
+    (label || "").toLowerCase().includes(kw) ||
+    (email || "").toLowerCase().includes(kw);
+  const acc = (state.email.accounts || []).filter(
+    (a) => a.email && match(a.label || a.username, a.email),
+  );
+  const inb = (state.email.inboxes || []).filter((b) =>
+    match(b.email || b.url, b.email),
+  );
+  const item = (key, label, sub) => `
+    <div class="mailbox-item ${state.email.selected === key ? "active" : ""}" data-key="${escapeHtml(key)}">
+      <div class="mailbox-name">${escapeHtml(label)}</div>
+      ${sub ? `<div class="mailbox-sub">${escapeHtml(sub)}</div>` : ""}
+    </div>`;
+  let html = "";
+  if (acc.length) {
+    html += `<div class="mailbox-group">账号邮箱（${acc.length}）</div>` +
+      acc.map((a) => item(`account:${a.id}`, a.label || a.username, a.email)).join("");
+  }
+  if (inb.length) {
+    html += `<div class="mailbox-group">独立邮箱（${inb.length}）</div>` +
+      inb.map((b) => item(`inbox:${b.id}`, b.email || b.url, "")).join("");
+  }
+  box.innerHTML = html || `<div class="empty-tab">暂无邮箱，点「导入邮箱」添加</div>`;
+  box.querySelectorAll(".mailbox-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.email.selected = el.dataset.key;
+      renderMailboxList();
+      loadMessages();
+    });
+  });
+}
+
+function renderMailHero() {
+  const box = document.getElementById("mailHero");
+  const info = mailKeyInfo(state.email.selected);
+  if (!info) {
+    box.innerHTML = `<div class="mail-hero-empty">从左侧选择邮箱</div>`;
+    return;
+  }
+  const items = state.email.items || [];
+  const withCode = items.find((m) => m.code);
+  const title = info.kind === "inbox" ? info.label : info.label || info.username;
+  box.innerHTML = `
+    <div class="mail-hero-head">
+      <div class="mail-hero-title">${escapeHtml(title)}</div>
+      <div class="mail-hero-sub">${escapeHtml(info.email || info.url || "")}</div>
+    </div>
+    ${withCode ? `
+      <div class="mail-hero-code">
+        <div class="mail-hero-label">最新验证码</div>
+        <div class="mail-hero-value">${escapeHtml(withCode.code)}</div>
+        <button class="btn btn-primary" data-copy="${escapeHtml(withCode.code)}">复制验证码</button>
+      </div>` : `
+      <div class="mail-hero-empty">该邮箱暂无验证码邮件（共 ${items.length} 封）</div>`}`;
+  box.querySelectorAll("[data-copy]").forEach((btn) =>
+    btn.addEventListener("click", () => copyText(btn.dataset.copy)),
+  );
 }
 
 function emailUnbound(n) {
@@ -1026,41 +1116,67 @@ function highlightCodes(text, code) {
   return safe.split(escaped).join(`<span class="code-chip">${escaped}</span>`);
 }
 
-function renderEmailList() {
-  const box = document.getElementById("emailList");
+function renderMailList() {
+  const box = document.getElementById("mailList");
   const items = state.email.items || [];
   emailUnbound(items.length);
-  document.getElementById("emailDesc").textContent = items.length
-    ? `共 ${items.length} 封（仅展示，验证码不会自动填充到任何网站）`
-    : "查看账号关联邮箱的通知、安全邮件与验证码（仅展示，不会自动填充到任何网站）";
+  document.getElementById("emailDesc").textContent = state.email.selected
+    ? `当前邮箱共 ${items.length} 封（仅展示，验证码不会自动填充到任何网站）`
+    : "从左侧选择邮箱，查看通知、安全邮件与验证码（仅展示，不会自动填充到任何网站）";
+  if (state.email.detailId) {
+    renderMailDetail(box);
+    return;
+  }
   if (!items.length) {
     box.innerHTML = `<div class="empty-tab">暂无邮件：点「刷新邮件」按配置拉取，或「导入 JSON」手动导入</div>`;
     return;
   }
-  const codeBar = items.filter((m) => m.code).slice(0, 3).map((m) =>
-    `<span class="code-chip">${escapeHtml(m.code)}</span>`).join(" ");
-  box.innerHTML = `
-    ${codeBar ? `<div class="mail-code-row" style="margin-bottom:10px">当前验证码 ${codeBar}<span class="page-desc">（仅展示，不会自动填充）</span></div>` : ""}
-    <div class="item-list">${items.map((m) => `
-    <div class="item">
-      <div class="item-body">
-        <div class="item-title">${escapeHtml(m.subject || "(无主题)")}</div>
-        <div class="item-meta">
+  box.innerHTML = `<div class="mail-rows">${items.map((m) => `
+    <div class="mail-row" data-id="${m.id}">
+      <div class="mail-row-main">
+        <div class="mail-row-subject">${escapeHtml(m.subject || "(无主题)")}</div>
+        <div class="mail-row-meta">
           <span class="tag">${escapeHtml(m.sender || "-")}</span>
-          ${m.email ? `<span>${escapeHtml(m.email)}</span>` : ""}
           <span>${relTime(m.received_at || m.created_at)}</span>
         </div>
-        <div class="mail-body">${highlightCodes(m.body || "", m.code)}</div>
-        ${m.code ? `<div class="mail-code-row">验证码 <span class="code-chip" data-code="${escapeHtml(m.code)}">${escapeHtml(m.code)}</span><button class="btn btn-sm" data-copy="${escapeHtml(m.code)}">复制</button></div>` : ""}
       </div>
+      ${m.code ? `<span class="code-chip code-chip-lg">${escapeHtml(m.code)}</span>` : '<span class="mail-row-code"></span>'}
     </div>`).join("")}</div>`;
-
-  box.querySelectorAll("[data-copy]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      copyText(btn.dataset.copy);
+  box.querySelectorAll(".mail-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      state.email.detailId = Number(row.dataset.id);
+      renderMailList();
     });
   });
+}
+
+function renderMailDetail(box) {
+  const m = (state.email.items || []).find((x) => x.id === state.email.detailId);
+  if (!m) {
+    state.email.detailId = null;
+    renderMailList();
+    return;
+  }
+  box.innerHTML = `
+    <div class="mail-detail">
+      <div class="mail-detail-head">
+        <button class="btn btn-sm" id="mailBackBtn">← 返回列表</button>
+        <div class="mail-detail-title">${escapeHtml(m.subject || "(无主题)")}</div>
+        <div class="mail-detail-meta">
+          <span class="tag">${escapeHtml(m.sender || "-")}</span>
+          <span>${relTime(m.received_at || m.created_at)}</span>
+        </div>
+      </div>
+      ${m.code ? `<div class="mail-detail-code">验证码 <span class="code-chip code-chip-lg">${escapeHtml(m.code)}</span><button class="btn btn-sm" data-copy="${escapeHtml(m.code)}">复制</button></div>` : ""}
+      <div class="mail-body mail-body-detail">${highlightCodes(m.body || "", m.code)}</div>
+    </div>`;
+  document.getElementById("mailBackBtn").addEventListener("click", () => {
+    state.email.detailId = null;
+    renderMailList();
+  });
+  box.querySelectorAll("[data-copy]").forEach((btn) =>
+    btn.addEventListener("click", () => copyText(btn.dataset.copy)),
+  );
 }
 
 async function copyText(text) {
@@ -2046,14 +2162,22 @@ function bindEvents() {
   document.getElementById("emailSettingsClose").addEventListener("click", () => document.getElementById("emailModal").classList.add("hidden"));
   document.getElementById("emailSettingsSave").addEventListener("click", saveEmailSettings);
   document.getElementById("emailModal").addEventListener("click", (e) => { if (e.target.id === "emailModal") document.getElementById("emailModal").classList.add("hidden"); });
-  document.getElementById("emailAccount").addEventListener("change", (e) => {
-    state.email.filter = e.target.value;
-    loadEmail();
-  });
   document.getElementById("emailSearch").addEventListener("input", debounce(() => {
     state.email.q = document.getElementById("emailSearch").value.trim();
-    loadEmail();
+    loadMessages();
   }, 300));
+  document.getElementById("emailSort").addEventListener("change", (e) => {
+    state.email.sort = e.target.value;
+    loadMessages();
+  });
+  document.getElementById("emailFilter").addEventListener("change", (e) => {
+    state.email.filter = e.target.value;
+    loadMessages();
+  });
+  document.getElementById("emailMailboxSearch").addEventListener("input", (e) => {
+    state.email.mailboxQ = e.target.value;
+    renderMailboxList();
+  });
 
   document.querySelectorAll("#activityFilter .chip").forEach((c) => c.addEventListener("click", () => {
     document.querySelectorAll("#activityFilter .chip").forEach((x) => x.classList.toggle("active", x === c));

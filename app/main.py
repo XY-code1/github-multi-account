@@ -875,11 +875,13 @@ async def save_email_settings(payload: EmailSettingsIn) -> dict[str, Any]:
 @app.get("/api/email/messages")
 async def email_messages(
     accountId: int | None = None, inboxId: int | None = None,
-    q: str = "", limit: int = 100,
+    q: str = "", limit: int = 100, sort: str = "time", hasCode: str = "",
 ) -> dict[str, Any]:
-    """本地缓存的邮件列表（可按账号 / 独立邮箱 / 关键字筛选，正文提取验证码仅用于展示）。"""
+    """本地缓存的邮件列表（可按账号 / 独立邮箱 / 关键字筛选，支持验证码优先排序）。"""
     items = db.list_email_messages(
-        account_id=accountId, q=q, limit=limit, inbox_id=inboxId
+        account_id=accountId, q=q, limit=limit, inbox_id=inboxId,
+        sort="code" if sort == "code" else "time",
+        has_code=str(hasCode).lower() in ("1", "true"),
     )
     for it in items:
         it["code"] = _email_code(it.get("body") or "")

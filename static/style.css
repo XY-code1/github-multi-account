@@ -466,6 +466,133 @@ a:hover { text-decoration: underline; }
 .mail-table td.cell-sub { word-break: break-all; }
 .mail-table tr.row-invalid { opacity: 0.7; }
 
+/* 邮箱两栏布局 */
+.mail-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.mail-sidebar {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  padding: 10px;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+.mail-sidebar .input-sm { width: 100%; min-width: 0; margin-bottom: 8px; }
+.mailbox-list { display: flex; flex-direction: column; gap: 2px; }
+.mailbox-group {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 8px 6px 4px;
+  letter-spacing: 0.4px;
+}
+.mailbox-item {
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.mailbox-item:hover { background: var(--bg-hover); }
+.mailbox-item.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.mailbox-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mailbox-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+.mail-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+
+/* 最新验证码 hero */
+.mail-hero {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.mail-hero-title { font-size: 15px; font-weight: 700; }
+.mail-hero-sub { font-size: 12px; color: var(--text-faint); margin-top: 2px; word-break: break-all; }
+.mail-hero-code { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.mail-hero-label { font-size: 12px; color: var(--text-muted); }
+.mail-hero-value {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.mail-hero-empty { font-size: 13px; color: var(--text-faint); margin-left: auto; }
+
+/* 邮件列表 */
+.mail-rows { display: flex; flex-direction: column; gap: 6px; }
+.mail-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  cursor: pointer;
+}
+.mail-row:hover { border-color: var(--text-faint); background: var(--bg-hover); }
+.mail-row-main { flex: 1; min-width: 0; }
+.mail-row-subject {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mail-row-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.mail-row-code { min-width: 90px; text-align: right; }
+.code-chip-lg { font-size: 14px; padding: 3px 10px; letter-spacing: 1px; }
+
+/* 邮件详情 */
+.mail-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 14px 16px;
+}
+.mail-detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mail-detail-title { font-size: 15px; font-weight: 700; }
+.mail-detail-meta { display: flex; gap: 10px; font-size: 12px; color: var(--text-muted); }
+.mail-detail-code { margin-top: 10px; font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 10px; }
+.mail-body-detail { margin-top: 12px; max-height: none; font-size: 14px; }
+
+@media (max-width: 900px) {
+  .mail-layout { grid-template-columns: 1fr; }
+  .mail-sidebar { position: static; max-height: 240px; }
+}
+
 /* ---------------- 布局 ---------------- */
 
 .layout {

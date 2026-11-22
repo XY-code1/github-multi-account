@@ -160,25 +160,25 @@ func TestEmailMessageCRUD(t *testing.T) {
 		t.Fatalf("写入第二个账号失败: %v", err)
 	}
 
-	items, err := ListEmailMessages(db, &id1, "", 100, nil)
+	items, err := ListEmailMessages(db, &id1, "", 100, nil, "time", false)
 	if err != nil || len(items) != 1 {
 		t.Fatalf("按账号筛选失败: %v %+v", err, items)
 	}
 	if items[0].AccountID != int64(1) {
 		t.Fatalf("account_id 未正确返回: %+v", items[0].AccountID)
 	}
-	all, _ := ListEmailMessages(db, nil, "", 100, nil)
+	all, _ := ListEmailMessages(db, nil, "", 100, nil, "time", false)
 	if len(all) != 2 {
 		t.Fatalf("应有 2 封: %d", len(all))
 	}
-	matched, _ := ListEmailMessages(db, nil, "t2", 100, nil)
+	matched, _ := ListEmailMessages(db, nil, "t2", 100, nil, "time", false)
 	if len(matched) != 1 {
 		t.Fatalf("关键字筛选失败: %d", len(matched))
 	}
 	if n, _ := DeleteEmailMessages(db, &id1, nil); n != 1 {
 		t.Fatalf("删除条数应为 1: %d", n)
 	}
-	rest, _ := ListEmailMessages(db, nil, "", 100, nil)
+	rest, _ := ListEmailMessages(db, nil, "", 100, nil, "time", false)
 	if len(rest) != 1 {
 		t.Fatalf("删除后应剩 1 封: %d", len(rest))
 	}
@@ -217,7 +217,7 @@ func TestInboxCRUD(t *testing.T) {
 	if _, err := AddEmailMessage(db, nil, "a@b.com", "i1", "s", "t", "b", "", "", &id); err != nil {
 		t.Fatalf("写入独立邮箱邮件失败: %v", err)
 	}
-	msgs, _ := ListEmailMessages(db, nil, "", 100, &id)
+	msgs, _ := ListEmailMessages(db, nil, "", 100, &id, "time", false)
 	if len(msgs) != 1 || msgs[0].InboxID != first.ID {
 		t.Fatalf("按 inbox_id 筛选失败: %+v", msgs)
 	}
@@ -228,6 +228,25 @@ func TestInboxCRUD(t *testing.T) {
 	rest, _ := ListInboxes(db)
 	if len(rest) != 0 {
 		t.Fatalf("删除后应为空: %d", len(rest))
+	}
+}
+
+func TestListEmailMessagesCodeFirst(t *testing.T) {
+	db := newEmailTestDB(t)
+	_, _ = AddEmailMessage(db, nil, "a@b", "m1", "s", "无码", "b", "", "", nil)
+	_, _ = AddEmailMessage(db, nil, "a@b", "m2", "s", "有码", "code 4321", "", "4321", nil)
+
+	all, _ := ListEmailMessages(db, nil, "", 100, nil, "time", false)
+	if len(all) != 2 {
+		t.Fatalf("应有 2 封: %d", len(all))
+	}
+	codeFirst, _ := ListEmailMessages(db, nil, "", 100, nil, "code", false)
+	if codeFirst[0].Code == "" {
+		t.Fatalf("验证码邮件应排在最前: %+v", codeFirst)
+	}
+	only, _ := ListEmailMessages(db, nil, "", 100, nil, "time", true)
+	if len(only) != 1 || only[0].Code == "" {
+		t.Fatalf("仅验证码筛选失败: %+v", only)
 	}
 }
 

@@ -248,8 +248,10 @@ def list_email_messages(
     q: str = "",
     limit: int = 100,
     inbox_id: int | None = None,
+    sort: str = "time",
+    has_code: bool = False,
 ) -> list[dict[str, Any]]:
-    """列出本地缓存邮件（可按账号 / 独立邮箱 / 关键字筛选）。"""
+    """列出本地缓存邮件（可按账号 / 独立邮箱 / 关键字筛选，支持验证码优先排序）。"""
     if not DB_FILE.exists():
         return []
     limit = max(1, min(int(limit or 100), 500))
@@ -267,13 +269,19 @@ def list_email_messages(
         if inbox_id:
             cond.append("inbox_id=?")
             params.append(inbox_id)
+        if has_code:
+            cond.append("(code IS NOT NULL AND code<>'')")
         if q:
             cond.append("(subject LIKE ? OR body LIKE ? OR sender LIKE ? OR email LIKE ?)")
             like = f"%{q}%"
             params += [like, like, like, like]
         if cond:
             sql += " WHERE " + " AND ".join(cond)
-        sql += " ORDER BY datetime(received_at) DESC, id DESC LIMIT ?"
+        if sort == "code":
+            sql += (" ORDER BY (CASE WHEN code IS NOT NULL AND code<>'' THEN 0 ELSE 1 END),"
+                    " datetime(received_at) DESC, id DESC LIMIT ?")
+        else:
+            sql += " ORDER BY datetime(received_at) DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
